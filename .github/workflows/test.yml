@@ -1,0 +1,48 @@
+name: Controleer DienstenLezer
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Broncode ophalen
+        uses: actions/checkout@v6.0.2
+
+      - name: Node instellen
+        uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Dependencies installeren
+        run: npm ci
+
+      - name: Tests uitvoeren
+        run: npm test
+
+      - name: Webbuild controleren
+        run: npm run web:build
+
+  server:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Broncode ophalen
+        uses: actions/checkout@v6.0.2
+
+      - name: Rust-cache instellen
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Serverbuild controleren
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server

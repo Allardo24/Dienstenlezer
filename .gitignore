@@ -1,0 +1,9 @@
+node_modules/
+dist/
+src-tauri/target/
+server-data/
+*.tsbuildinfo
+vite-dev*.log
+.tmp-web-build/
+artifacts/
+deploy/home-assistant/published-repository/

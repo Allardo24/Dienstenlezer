@@ -1,0 +1,11 @@
+dienstenlezer.example.nl {
+    encode zstd gzip
+
+    # Maak eerst een hash met: caddy hash-password
+    # Verwijder deze beveiliging niet op een publiek domein.
+    basic_auth {
+        dienstenlezer VERVANG_DIT_DOOR_DE_WACHTWOORDHASH
+    }
+
+    reverse_proxy 127.0.0.1:8080
+}
