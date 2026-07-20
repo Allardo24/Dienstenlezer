@@ -32,9 +32,13 @@ for (const value of [
   "ingress: true",
   "ingress_port: 8080",
   "ingress_stream: true",
-  "/api/health",
 ]) {
   if (!config.includes(value)) throw new Error(`Ontbrekende add-oninstelling: ${value}`);
+}
+
+const dockerfile = await readFile(resolve(outputApp, "Dockerfile"), "utf8");
+if (!dockerfile.includes("HEALTHCHECK") || !dockerfile.includes("/api/health")) {
+  throw new Error("Docker HEALTHCHECK voor /api/health ontbreekt.");
 }
 
 for (const forbidden of ["server-data", "node_modules", "dist", "target"]) {
