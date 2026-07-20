@@ -25,7 +25,15 @@ const config = await readFile(resolve(outputApp, "config.yaml"), "utf8");
 for (const value of ["__VERSION__", "__IMAGE_LINE__"]) {
   if (config.includes(value)) throw new Error(`Niet vervangen placeholder: ${value}`);
 }
-for (const value of ["aarch64", "amd64", '"8080/tcp": 8080', "/api/health"]) {
+for (const value of [
+  "aarch64",
+  "amd64",
+  '"8080/tcp": 8080',
+  "ingress: true",
+  "ingress_port: 8080",
+  "ingress_stream: true",
+  "/api/health",
+]) {
   if (!config.includes(value)) throw new Error(`Ontbrekende add-oninstelling: ${value}`);
 }
 

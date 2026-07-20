@@ -12,7 +12,18 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    name: Bouw ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: linux/arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
     steps:
       - name: Broncode ophalen
         uses: actions/checkout@v6.0.2
@@ -24,8 +35,45 @@ jobs:
           echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
           echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dienstenlezer" >> "$GITHUB_OUTPUT"
 
-      - name: QEMU instellen
-        uses: docker/setup-qemu-action@v4
+      - name: Docker Buildx instellen
+        uses: docker/setup-buildx-action@v4
+
+      - name: Aanmelden bij GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Native image bouwen en publiceren
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          build-args: |
+            BUILD_VERSION=${{ steps.info.outputs.version }}
+            BUILD_ARCH=${{ matrix.arch }}
+          tags: |
+            ${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}-${{ matrix.arch }}
+          cache-from: type=gha,scope=ha-${{ matrix.arch }}
+          cache-to: type=gha,scope=ha-${{ matrix.arch }},mode=max
+          provenance: false
+
+  manifest:
+    name: Combineer multi-architecture image
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Broncode ophalen
+        uses: actions/checkout@v6.0.2
+
+      - name: Versie en imagenaam bepalen
+        id: info
+        shell: bash
+        run: |
+          echo "version=$(jq -r .version package.json)" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/dienstenlezer" >> "$GITHUB_OUTPUT"
 
       - name: Docker Buildx instellen
         uses: docker/setup-buildx-action@v4
@@ -37,18 +85,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: ARM64- en AMD64-image bouwen en publiceren
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/arm64,linux/amd64
-          push: true
-          build-args: |
-            BUILD_VERSION=${{ steps.info.outputs.version }}
-            BUILD_ARCH=multi
-          tags: |
-            ${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}
-            ${{ steps.info.outputs.image }}:latest
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: false
+      - name: Architecturen combineren
+        shell: bash
+        run: |
+          docker buildx imagetools create \
+            --tag "${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}" \
+            --tag "${{ steps.info.outputs.image }}:latest" \
+            "${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}-amd64" \
+            "${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}-arm64"
+
+      - name: Gepubliceerd image controleren
+        run: docker buildx imagetools inspect "${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}"

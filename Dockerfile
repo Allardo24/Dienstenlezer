@@ -9,8 +9,13 @@ RUN npm run web:build
 
 FROM rust:1.88-bookworm AS server-build
 WORKDIR /build
-COPY src-tauri ./src-tauri
-RUN cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server
+COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
+RUN mkdir -p src-tauri/src/bin \
+    && printf 'pub fn placeholder() {}\n' > src-tauri/src/lib.rs \
+    && printf 'fn main() {}\n' > src-tauri/src/bin/dienstenlezer-server.rs \
+    && cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server
+COPY src-tauri/src ./src-tauri/src
+RUN cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server
 
 FROM debian:bookworm-slim
 ARG BUILD_VERSION=dev

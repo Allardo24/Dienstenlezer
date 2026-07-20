@@ -1,4 +1,5 @@
 import type { LiveMovementRequest, LiveStatusResponse, LiveSyncState } from "./types";
+import { serverUrl } from "./serverUrl";
 
 const webLiveEtags = new Map<string, string>();
 const webLiveResponses = new Map<string, LiveStatusResponse>();
@@ -18,7 +19,7 @@ export async function getQbuzzLiveStatuses(date: string, movements: LiveMovement
   if (knownEtag) {
     headers.set("If-None-Match", knownEtag);
   }
-  const response = await fetch(`/api/qbuzz/live?date=${encodeURIComponent(date)}`, {
+  const response = await fetch(serverUrl(`/api/qbuzz/live?date=${encodeURIComponent(date)}`), {
     method: "GET",
     headers,
     cache: "no-cache",

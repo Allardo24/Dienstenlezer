@@ -5,6 +5,7 @@ import type {
   StoredPdfFileSummary,
   StoredSchedule,
 } from "./types";
+import { serverUrl } from "./serverUrl";
 
 const DB_NAME = "dienstenlezer";
 const DB_VERSION = 1;
@@ -20,7 +21,7 @@ function usesServerStorage(): boolean {
 }
 
 async function serverRequest(path: string, init?: RequestInit): Promise<Response> {
-  const response = await fetch(path, init);
+  const response = await fetch(serverUrl(path), init);
   if (!response.ok) {
     const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
     throw new Error(payload?.error ?? `Bestandenbackend gaf HTTP ${response.status}.`);
