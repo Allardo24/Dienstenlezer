@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getQbuzzLiveStatuses, plannedMarkerMinute } from "./live";
+import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, plannedMarkerMinute } from "./live";
 
 describe("plannedMarkerMinute", () => {
   it("plaatst +5 minuten vertraging vijf minuten links van de nu-lijn", () => {
@@ -24,6 +24,15 @@ describe("web live-api", () => {
   afterEach(() => vi.unstubAllGlobals());
 
   it("stuurt in de webversie alleen de datum naar de serverbackend", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", {
+      location: { pathname: "/" },
+      localStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
     const responseBody = {
       statuses: [
         { movementId: "a", matched: true, delaySeconds: 120, vehicleId: "8123" },
@@ -73,5 +82,6 @@ describe("web live-api", () => {
       expect.objectContaining({ method: "GET" }),
     );
     expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("body");
+    expect(getCachedQbuzzLiveStatuses("2026-07-12")?.response.statuses[0].vehicleId).toBe("8123");
   });
 });

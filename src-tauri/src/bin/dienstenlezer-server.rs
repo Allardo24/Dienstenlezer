@@ -270,7 +270,8 @@ async fn qbuzz_live_from_schedule(
     let response = get_live_statuses(&state.live, query.date, movements)
         .await
         .map_err(|error| api_error(StatusCode::BAD_GATEWAY, error))?;
-    etagged_live_json(&headers, &response)
+    let fetched_at = response.fetched_at();
+    etagged_live_json(&headers, &response, fetched_at)
 }
 
 async fn qbuzz_live_legacy(
@@ -463,6 +464,7 @@ fn etagged_json(
 fn etagged_live_json(
     request_headers: &HeaderMap,
     value: &impl Serialize,
+    fetched_at: Option<i64>,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     let bytes = serde_json::to_vec(value).map_err(internal_error)?;
     let mut semantic = serde_json::to_value(value).map_err(internal_error)?;
@@ -473,8 +475,18 @@ fn etagged_live_json(
             }
         }
     }
+    if let Some(sync) = semantic.get_mut("sync").and_then(Value::as_object_mut) {
+        sync.remove("fetchedAt");
+    }
     let revision = hash_json(&semantic)?;
-    etagged_bytes(request_headers, bytes, revision)
+    let mut response = etagged_bytes(request_headers, bytes, revision)?;
+    if let Some(fetched_at) = fetched_at {
+        response.headers_mut().insert(
+            "x-dienstenlezer-live-fetched-at",
+            HeaderValue::from_str(&fetched_at.to_string()).map_err(internal_error)?,
+        );
+    }
+    Ok(response)
 }
 
 fn etagged_bytes(
@@ -711,8 +723,8 @@ mod tests {
     fn live_etag_ignores_feed_timestamp_only_changes() {
         let first = serde_json::json!({"statuses": [{"movementId": "m1", "delaySeconds": 60, "updatedAt": 100}]});
         let second = serde_json::json!({"statuses": [{"movementId": "m1", "delaySeconds": 60, "updatedAt": 200}]});
-        let first_response = etagged_live_json(&HeaderMap::new(), &first).unwrap();
-        let second_response = etagged_live_json(&HeaderMap::new(), &second).unwrap();
+        let first_response = etagged_live_json(&HeaderMap::new(), &first, Some(100)).unwrap();
+        let second_response = etagged_live_json(&HeaderMap::new(), &second, Some(200)).unwrap();
         assert_eq!(
             first_response.headers().get(header::ETAG),
             second_response.headers().get(header::ETAG)

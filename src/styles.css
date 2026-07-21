@@ -335,15 +335,69 @@ h2 {
   white-space: nowrap;
 }
 
-.live-status {
+.live-status-wrap {
   margin: -8px 0 12px;
-  color: #526978;
-  font-size: 0.88rem;
-  font-weight: 700;
 }
 
-.live-status p {
-  margin: 0;
+.live-data-status {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  width: fit-content;
+  min-height: 42px;
+  padding: 7px 10px;
+  border: 1px solid #b9d9d5;
+  border-radius: 7px;
+  color: #0f625e;
+  background: #effaf8;
+}
+
+.live-data-status > div {
+  display: grid;
+  gap: 1px;
+}
+
+.live-data-status strong,
+.live-data-status span {
+  line-height: 1.25;
+}
+
+.live-data-status strong {
+  font-size: 0.82rem;
+}
+
+.live-data-status-heading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.live-data-status-spinner {
+  flex: 0 0 auto;
+}
+
+.live-data-status span {
+  color: #526978;
+  font-size: 0.74rem;
+  font-weight: 650;
+}
+
+.live-data-status.state-syncing {
+  border-color: #9fcbd5;
+  color: #075e70;
+  background: #edf9fc;
+}
+
+.live-data-status.state-stale,
+.live-data-status.state-error {
+  border-color: #e8a7ad;
+  color: #b42332;
+  background: #fff1f2;
+}
+
+.live-data-status.state-stale strong,
+.live-data-status.state-error strong {
+  color: #b42332;
 }
 
 .live-diagnostics {
@@ -379,14 +433,6 @@ h2 {
 
 .live-diagnostics dd {
   font-weight: 800;
-}
-
-.live-status.state-ready {
-  color: #0f766e;
-}
-
-.live-status.state-error {
-  color: #b91c1c;
 }
 
 .timeline-section,
@@ -1305,6 +1351,10 @@ tbody tr:hover {
   color: #b91c1c;
 }
 
+.guidance-live-status {
+  justify-self: end;
+}
+
 .guidance-empty {
   margin: 0;
 }
@@ -2060,7 +2110,8 @@ tbody tr:hover {
 
   .guidance-service-input,
   .guidance-time-input,
-  .guidance-live-state {
+  .guidance-live-state,
+  .guidance-live-status {
     grid-column: 1 / -1;
   }
 
@@ -2074,8 +2125,7 @@ tbody tr:hover {
     padding: 9px 10px;
   }
 
-  .guidance-selector.is-locked .guidance-selector-title,
-  .guidance-selector.is-locked .guidance-live-state {
+  .guidance-selector.is-locked .guidance-selector-title {
     display: none;
   }
 
@@ -2098,6 +2148,11 @@ tbody tr:hover {
   .guidance-live-state {
     justify-items: start;
     text-align: left;
+  }
+
+  .guidance-live-status {
+    justify-self: stretch;
+    width: 100%;
   }
 
   .guidance-actions {

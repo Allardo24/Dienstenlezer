@@ -112,6 +112,7 @@ export type LiveSyncState = {
   state: "ready" | "syncing" | "unavailable" | "error";
   message: string;
   indexedAt?: number;
+  fetchedAt?: number;
 };
 
 export type LiveDiagnostics = {

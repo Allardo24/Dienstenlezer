@@ -68,6 +68,7 @@ pub struct LiveSyncState {
     state: String,
     message: String,
     indexed_at: Option<i64>,
+    fetched_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -76,6 +77,12 @@ pub struct LiveStatusResponse {
     statuses: Vec<LiveMovementStatus>,
     sync: LiveSyncState,
     diagnostics: LiveDiagnostics,
+}
+
+impl LiveStatusResponse {
+    pub fn fetched_at(&self) -> Option<i64> {
+        self.sync.fetched_at
+    }
 }
 
 #[derive(Debug, Default, Serialize)]
@@ -98,6 +105,7 @@ pub struct LiveRuntime {
     cache_directory: PathBuf,
     progress_handler: Option<ProgressHandler>,
     realtime_cache: Arc<Mutex<Option<Arc<CachedRealtimeFeeds>>>>,
+    index_cache: Arc<Mutex<Option<Arc<LiveIndex>>>>,
 }
 
 impl LiveRuntime {
@@ -108,6 +116,7 @@ impl LiveRuntime {
             cache_directory,
             progress_handler: None,
             realtime_cache: Arc::new(Mutex::new(None)),
+            index_cache: Arc::new(Mutex::new(None)),
         })
     }
 
@@ -129,6 +138,7 @@ impl LiveRuntime {
                 state: state.to_owned(),
                 message: message.to_owned(),
                 indexed_at,
+                fetched_at: None,
             });
         }
     }
@@ -144,6 +154,20 @@ struct LiveIndex {
     trips: Vec<QbuzzTrip>,
     calendar: HashMap<String, CalendarRule>,
     calendar_exceptions: HashMap<String, HashMap<String, i32>>,
+    #[serde(skip)]
+    trips_by_line_and_number: HashMap<String, Vec<usize>>,
+}
+
+impl LiveIndex {
+    fn rebuild_trip_lookup(&mut self) {
+        self.trips_by_line_and_number.clear();
+        for (index, trip) in self.trips.iter().enumerate() {
+            self.trips_by_line_and_number
+                .entry(trip_lookup_key(&trip.line, &trip.trip_number))
+                .or_default()
+                .push(index);
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -376,6 +400,7 @@ pub async fn get_live_statuses(
             state: "ready".to_owned(),
             message: format!("Qbuzz live: {} ritten gekoppeld, realtime elke 30 seconden ververst.", diagnostics.matched),
             indexed_at: Some(index.indexed_at),
+            fetched_at: Some(realtime.fetched_at),
         },
         diagnostics,
     })
@@ -482,9 +507,16 @@ async fn realtime_feeds(runtime: &LiveRuntime) -> Result<Arc<CachedRealtimeFeeds
         }
     }
 
-    let updates = decode_trip_updates(&fetch_realtime_feed(TRIP_UPDATES_URL, "Qbuzz realtime-feed").await?)?;
-    let vehicle_positions = fetch_realtime_feed(VEHICLE_POSITIONS_URL, "Qbuzz voertuigposities")
-        .await
+    let previous = cached.as_ref().map(Arc::clone);
+    let (updates_result, positions_result) = tokio::join!(
+        fetch_realtime_feed(TRIP_UPDATES_URL, "Qbuzz realtime-feed"),
+        fetch_realtime_feed(VEHICLE_POSITIONS_URL, "Qbuzz voertuigposities"),
+    );
+    let updates = match updates_result.and_then(|bytes| decode_trip_updates(&bytes)) {
+        Ok(updates) => updates,
+        Err(error) => return previous.ok_or(error),
+    };
+    let vehicle_positions = positions_result
         .ok()
         .and_then(|bytes| decode_vehicle_positions(&bytes).ok())
         .unwrap_or_default();
@@ -497,11 +529,20 @@ async fn realtime_feeds(runtime: &LiveRuntime) -> Result<Arc<CachedRealtimeFeeds
     Ok(snapshot)
 }
 
-async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<LiveIndex, String> {
+async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveIndex>, String> {
+    let mut memory_cache = runtime.index_cache.lock().await;
+    if let Some(index) = memory_cache.as_ref() {
+        if index.version >= LIVE_INDEX_VERSION && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS {
+            return Ok(Arc::clone(index));
+        }
+    }
+
     let (index_path, archive_path) = runtime.cache_paths();
 
     if let Ok(index) = read_index(&index_path) {
         if index.version >= LIVE_INDEX_VERSION && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS {
+            let index = Arc::new(index);
+            *memory_cache = Some(Arc::clone(&index));
             return Ok(index);
         }
     }
@@ -518,6 +559,8 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<LiveIndex, S
             &format!("Qbuzz-index gereed: {} ritten lokaal beschikbaar.", index.trips.len()),
             Some(index.indexed_at),
         );
+        let index = Arc::new(index);
+        *memory_cache = Some(Arc::clone(&index));
         return Ok(index);
     }
 
@@ -536,6 +579,8 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<LiveIndex, S
         Some(index.indexed_at),
     );
 
+    let index = Arc::new(index);
+    *memory_cache = Some(Arc::clone(&index));
     Ok(index)
 }
 
@@ -668,7 +713,9 @@ fn format_wait_duration(seconds: u64) -> String {
 
 fn read_index(path: &Path) -> Result<LiveIndex, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
-    serde_json::from_reader(BufReader::new(file)).map_err(|error| error.to_string())
+    let mut index: LiveIndex = serde_json::from_reader(BufReader::new(file)).map_err(|error| error.to_string())?;
+    index.rebuild_trip_lookup();
+    Ok(index)
 }
 
 fn write_index(path: &Path, index: &LiveIndex) -> Result<(), String> {
@@ -714,14 +761,17 @@ fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex,
         })
         .collect();
 
-    Ok(LiveIndex {
+    let mut index = LiveIndex {
         version: LIVE_INDEX_VERSION,
         operational_date,
         indexed_at: now_timestamp(),
         trips,
         calendar,
         calendar_exceptions,
-    })
+        trips_by_line_and_number: HashMap::new(),
+    };
+    index.rebuild_trip_lookup();
+    Ok(index)
 }
 
 fn read_qbuzz_agencies(archive: &mut ZipArchive<File>) -> Result<HashSet<String>, String> {
@@ -949,21 +999,22 @@ fn match_attempt<'a>(index: &'a LiveIndex, movement: &LiveMovementRequest, date:
     }
     let departure = time_hhmm(&movement.departure);
     let date = date.replace('-', "");
-    let scheduled_line_trip_exists = index.trips.iter().any(|trip| {
-        runs_on(index, trip, &date) && normalise_line(&trip.line) == line && normalise_text(&trip.trip_number) == trip_number
-    });
-    if !scheduled_line_trip_exists {
+    let key = trip_lookup_key(&line, &trip_number);
+    let Some(candidate_indices) = index.trips_by_line_and_number.get(&key) else {
+        return MatchAttempt::NoLineOrTrip;
+    };
+    let scheduled_candidates = candidate_indices
+        .iter()
+        .map(|candidate| &index.trips[*candidate])
+        .filter(|trip| runs_on(index, trip, &date))
+        .collect::<Vec<_>>();
+    if scheduled_candidates.is_empty() {
         return MatchAttempt::NoLineOrTrip;
     }
-    let exact_candidates = index
-        .trips
+    let exact_candidates = scheduled_candidates
         .iter()
-        .filter(|trip| {
-            runs_on(index, trip, &date)
-                && normalise_line(&trip.line) == line
-                && normalise_text(&trip.trip_number) == trip_number
-                && trip.departure == departure
-        })
+        .copied()
+        .filter(|trip| trip.departure == departure)
         .collect::<Vec<_>>();
 
     match unique_candidate(exact_candidates, movement) {
@@ -974,14 +1025,11 @@ fn match_attempt<'a>(index: &'a LiveIndex, movement: &LiveMovementRequest, date:
 
     // Pdf- en GTFS-planning kunnen rond haltes een minuut verschillen. Alleen
     // een unieke kandidaat binnen twee minuten mag alsnog live gekoppeld worden.
-    let tolerant_candidates = index
-        .trips
+    let tolerant_candidates = scheduled_candidates
         .iter()
+        .copied()
         .filter(|trip| {
-            runs_on(index, trip, &date)
-                && normalise_line(&trip.line) == line
-                && normalise_text(&trip.trip_number) == trip_number
-                && time_difference_minutes(&trip.departure, &movement.departure).is_some_and(|difference| difference <= 2)
+            time_difference_minutes(&trip.departure, &movement.departure).is_some_and(|difference| difference <= 2)
                 && time_difference_minutes(&trip.arrival, &movement.arrival).is_some_and(|difference| difference <= 2)
         })
         .collect::<Vec<_>>();
@@ -1146,6 +1194,10 @@ fn normalise_line(value: &str) -> String {
     compact.strip_prefix('L').filter(|rest| rest.chars().all(|character| character.is_ascii_digit())).unwrap_or(&compact).to_owned()
 }
 
+fn trip_lookup_key(line: &str, trip_number: &str) -> String {
+    format!("{}\0{}", normalise_line(line), normalise_text(trip_number))
+}
+
 fn normalise_text(value: &str) -> String {
     value.chars().filter(|character| character.is_ascii_alphanumeric()).collect::<String>().to_uppercase()
 }
@@ -1192,7 +1244,7 @@ mod tests {
     use super::*;
 
     fn index_with_trip(trip: QbuzzTrip) -> LiveIndex {
-        LiveIndex {
+        let mut index = LiveIndex {
             version: LIVE_INDEX_VERSION,
             operational_date: "20260713".to_owned(),
             indexed_at: 0,
@@ -1206,7 +1258,10 @@ mod tests {
                 },
             )]),
             calendar_exceptions: HashMap::new(),
-        }
+            trips_by_line_and_number: HashMap::new(),
+        };
+        index.rebuild_trip_lookup();
+        index
     }
 
     fn request() -> LiveMovementRequest {
@@ -1303,6 +1358,7 @@ mod tests {
             to_stop_id: "stop-z".to_owned(),
             last_stop_sequence: 99,
         });
+        index.rebuild_trip_lookup();
 
         assert!(match_trip(&index, &request(), "2026-07-11").is_none());
     }

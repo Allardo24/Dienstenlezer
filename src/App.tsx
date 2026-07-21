@@ -17,7 +17,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { getQbuzzLiveStatuses, isDesktopLiveAvailable, listenToQbuzzSyncProgress, plannedMarkerMinute } from "./live";
+import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, isDesktopLiveAvailable, listenToQbuzzSyncProgress, plannedMarkerMinute } from "./live";
 import {
   createPdfContentHash,
   createStoredFileId,
@@ -76,6 +76,30 @@ function writeLockedGuidanceService(serviceNumber?: string) {
   }
 }
 
+function cachedLiveResponse(date: string): LiveStatusResponse | undefined {
+  const cached = getCachedQbuzzLiveStatuses(date);
+  if (!cached) {
+    return undefined;
+  }
+
+  return {
+    ...cached.response,
+    sync: {
+      ...cached.response.sync,
+      state: "syncing",
+      fetchedAt: cached.response.sync.fetchedAt ?? Math.floor(cached.savedAt / 1000),
+      message: "Opgeslagen livegegevens geladen; actuele gegevens worden opgehaald...",
+    },
+  };
+}
+
+function initialLiveResponse(): LiveStatusResponse {
+  return cachedLiveResponse(todayInputValue()) ?? {
+    statuses: [],
+    sync: { state: "unavailable", message: "Live status wordt gestart." },
+  };
+}
+
 function App() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const storageRequestIdRef = useRef(0);
@@ -94,10 +118,7 @@ function App() {
   const [guidanceServiceNumber, setGuidanceServiceNumber] = useState(() => readLockedGuidanceService() ?? "");
   const [guidanceLocked, setGuidanceLocked] = useState(() => Boolean(readLockedGuidanceService()));
   const [guidanceTimeOverride, setGuidanceTimeOverride] = useState("");
-  const [liveResponse, setLiveResponse] = useState<LiveStatusResponse>({
-    statuses: [],
-    sync: { state: "unavailable", message: "Live status staat uit." },
-  });
+  const [liveResponse, setLiveResponse] = useState<LiveStatusResponse>(initialLiveResponse);
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [isPageVisible, setIsPageVisible] = useState(() => document.visibilityState !== "hidden");
 
@@ -218,16 +239,24 @@ function App() {
   }, [liveRequested]);
 
   useEffect(() => {
-    if (!liveRequested || !isToday) {
+    if (!liveRequested) {
+      return;
+    }
+
+    if (!isToday) {
       setLiveResponse({
         statuses: [],
         sync: {
           state: "unavailable",
-          message: isToday ? "Live status staat uit." : "Live status is alleen beschikbaar voor vandaag.",
+          message: "Live status is alleen beschikbaar voor vandaag.",
         },
       });
       return;
     }
+
+    setLiveResponse((current) => current.statuses.length > 0
+      ? current
+      : cachedLiveResponse(selectedDate) ?? current);
 
     if (!isPageVisible) {
       return;
@@ -257,7 +286,13 @@ function App() {
 
         setLiveResponse((current) => ({
           ...current,
-          sync: { state: "syncing", message: "Qbuzz live-status ophalen..." },
+          sync: {
+            ...current.sync,
+            state: "syncing",
+            message: current.statuses.length > 0
+              ? "Nieuwe Qbuzz-livegegevens ophalen..."
+              : "Eerste Qbuzz-livegegevens ophalen...",
+          },
         }));
         const response = await getQbuzzLiveStatuses(selectedDate, requestMovements);
         if (!cancelled) {
@@ -266,13 +301,14 @@ function App() {
         }
       } catch (error) {
         if (!cancelled) {
-          setLiveResponse({
-            statuses: [],
+          setLiveResponse((current) => ({
+            ...current,
             sync: {
+              ...current.sync,
               state: "error",
               message: liveErrorMessage(error),
             },
-          });
+          }));
           timer = window.setTimeout(() => void refreshLiveStatuses(), 30_000);
         }
       }
@@ -507,6 +543,7 @@ function App() {
           liveStatuses={liveResponse.statuses}
           liveSync={liveResponse.sync}
           currentTime={guidanceCurrentTime}
+          liveCurrentTime={currentTime}
           timeOverride={guidanceTimeOverride}
           onTimeOverride={setGuidanceTimeOverride}
           isLocked={guidanceLocked}
@@ -534,8 +571,8 @@ function App() {
           </section>
 
           {page === "loops" && isToday && (
-            <div className={`live-status state-${liveResponse.sync.state}`}>
-              <p>{liveResponse.sync.message}</p>
+            <div className="live-status-wrap">
+              <LiveDataStatus sync={liveResponse.sync} currentTime={currentTime} />
               {liveResponse.diagnostics && (
                 <details className="live-diagnostics">
                   <summary>Live-diagnostiek</summary>
@@ -820,6 +857,68 @@ type TakeoverArrivalInfo = {
   vehicleId?: string;
 };
 
+const LIVE_STALE_AFTER_SECONDS = 90;
+
+function LiveDataStatus({
+  sync,
+  currentTime,
+  className = "",
+  label = "Qbuzz live",
+}: {
+  sync: LiveSyncState;
+  currentTime: Date;
+  className?: string;
+  label?: string;
+}) {
+  const ageSeconds = sync.fetchedAt === undefined
+    ? undefined
+    : Math.max(0, Math.floor(currentTime.getTime() / 1000) - sync.fetchedAt);
+  const stale = ageSeconds !== undefined && ageSeconds > LIVE_STALE_AFTER_SECONDS;
+  const stateClass = stale ? "state-stale" : `state-${sync.state}`;
+  const heading = stale
+    ? `Pas op! Livegegevens al ${formatLiveAge(ageSeconds)} niet ververst`
+    : sync.state === "syncing"
+      ? "Livegegevens verversen..."
+      : sync.state === "error"
+        ? "Livegegevens konden niet worden ververst"
+        : sync.state === "ready"
+          ? `${label} bijgewerkt`
+          : label;
+  const detail = sync.fetchedAt === undefined
+    ? sync.message
+    : `Laatste feed ${formatEpochClock(sync.fetchedAt)} - ${formatLiveAge(ageSeconds ?? 0)} geleden`;
+
+  return (
+    <div className={`live-data-status ${stateClass} ${className}`.trim()} role={stale || sync.state === "error" ? "alert" : "status"} title={sync.message}>
+      {stale || sync.state === "error"
+        ? <AlertTriangle size={17} aria-hidden="true" />
+        : <Clock3 size={17} aria-hidden="true" />}
+      <div>
+        <strong className="live-data-status-heading">
+          {heading}
+          {sync.state === "syncing" && (
+            <Loader2 className="live-data-status-spinner spin" size={14} aria-label="Livegegevens worden opgehaald" />
+          )}
+        </strong>
+        <span>{detail}</span>
+      </div>
+    </div>
+  );
+}
+
+function formatLiveAge(seconds: number): string {
+  if (seconds < 60) {
+    return `${seconds} sec`;
+  }
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) {
+    return `${minutes} min`;
+  }
+  const hours = Math.floor(minutes / 60);
+  const remainingMinutes = minutes % 60;
+  return remainingMinutes === 0 ? `${hours} uur` : `${hours} uur ${remainingMinutes} min`;
+}
+
 function DutyGuidance({
   services,
   movements,
@@ -828,6 +927,7 @@ function DutyGuidance({
   liveStatuses,
   liveSync,
   currentTime,
+  liveCurrentTime,
   timeOverride,
   onTimeOverride,
   isLocked,
@@ -842,6 +942,7 @@ function DutyGuidance({
   liveStatuses: LiveMovementStatus[];
   liveSync: LiveSyncState;
   currentTime: Date;
+  liveCurrentTime: Date;
   timeOverride: string;
   onTimeOverride: (value: string) => void;
   isLocked: boolean;
@@ -921,10 +1022,14 @@ function DutyGuidance({
           <span>{isLocked ? <Lock size={17} /> : <LockOpen size={17} />}</span>
           <strong>{isLocked ? "Vastgezet" : "Vastzetten"}</strong>
         </label>
-        <div className={`guidance-live-state state-${liveSync.state}`}>
-          <span>{isDemo ? "Demo-live" : isToday ? "OVapi live" : "Planning"}</span>
-          <small>{isToday ? liveSync.message : "Live informatie is alleen beschikbaar voor vandaag."}</small>
-        </div>
+        {isToday ? (
+          <LiveDataStatus sync={liveSync} currentTime={liveCurrentTime} className="guidance-live-status" label={isDemo ? "Demo-live" : "OVapi live"} />
+        ) : (
+          <div className="guidance-live-state">
+            <span>Planning</span>
+            <small>Live informatie is alleen beschikbaar voor vandaag.</small>
+          </div>
+        )}
       </section>
 
       {!selectedService ? (
