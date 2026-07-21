@@ -2,7 +2,6 @@ name: DienstenLezer
 version: "__VERSION__"
 slug: dienstenlezer
 description: Diensten-pdf's, omlopen, dienstbegeleiding en Qbuzz-livegegevens.
-url: "https://dienstenlezer.allardnet.nl"
 arch:
   - aarch64
   - amd64

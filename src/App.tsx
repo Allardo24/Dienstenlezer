@@ -635,6 +635,34 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
   );
 }
 
+function VehicleLink({
+  vehicleId,
+  className = "",
+  children,
+  title,
+}: {
+  vehicleId: string;
+  className?: string;
+  children?: React.ReactNode;
+  title?: string;
+}) {
+  const compactId = vehicleId.trim();
+  const vehicleSlug = compactId.toLowerCase().startsWith("qbz_") ? compactId : `qbz_${compactId}`;
+
+  return (
+    <a
+      className={`vehicle-link ${className}`.trim()}
+      href={`https://busposities.nl/voertuig/${encodeURIComponent(vehicleSlug)}`}
+      target="_blank"
+      rel="noreferrer"
+      title={title ?? `Open Bus ${compactId} op Busposities.nl`}
+      onClick={(event) => event.stopPropagation()}
+    >
+      {children ?? <><BusFront size={16} /> Bus {compactId}</>}
+    </a>
+  );
+}
+
 function LoadingState() {
   return (
     <section className="empty-state">
@@ -982,6 +1010,17 @@ function DutyGuidance({
 
   return (
     <div className="guidance-page">
+      <div className="guidance-debug-row">
+        {isToday ? (
+          <LiveDataStatus sync={liveSync} currentTime={liveCurrentTime} className="guidance-live-status" label={isDemo ? "Demo-live" : "OVapi live"} />
+        ) : (
+          <div className="guidance-live-state">
+            <span>Planning</span>
+            <small>Live informatie is alleen beschikbaar voor vandaag.</small>
+          </div>
+        )}
+      </div>
+
       <section className={isLocked ? "guidance-selector is-locked" : "guidance-selector"}>
         <div className="guidance-selector-title">
           <p className="eyebrow">Dienstbegeleiding</p>
@@ -1022,14 +1061,6 @@ function DutyGuidance({
           <span>{isLocked ? <Lock size={17} /> : <LockOpen size={17} />}</span>
           <strong>{isLocked ? "Vastgezet" : "Vastzetten"}</strong>
         </label>
-        {isToday ? (
-          <LiveDataStatus sync={liveSync} currentTime={liveCurrentTime} className="guidance-live-status" label={isDemo ? "Demo-live" : "OVapi live"} />
-        ) : (
-          <div className="guidance-live-state">
-            <span>Planning</span>
-            <small>Live informatie is alleen beschikbaar voor vandaag.</small>
-          </div>
-        )}
       </section>
 
       {!selectedService ? (
@@ -1087,7 +1118,7 @@ function DutyGuidance({
                           <span>{guidanceActionSubtitle(entry.movement)}</span>
                           <div className="guidance-badges">
                             {entry.movement.omloopnummer && <em>Omloop {displayLoopNumber(entry.movement.omloopnummer)}</em>}
-                            {live.vehicleId && <em className="bus-badge"><BusFront size={14} /> Bus {live.vehicleId}</em>}
+                            {live.vehicleId && <VehicleLink vehicleId={live.vehicleId} className="bus-badge" />}
                           </div>
                         </div>
                       </div>
@@ -1146,7 +1177,7 @@ function GuidanceAction({
       {entry && (
         <div className="guidance-action-meta">
           {entry.movement.omloopnummer && <span>Omloop {displayLoopNumber(entry.movement.omloopnummer)}</span>}
-          {live.vehicleId && <span className="bus-badge"><BusFront size={16} /> Bus {live.vehicleId}</span>}
+          {live.vehicleId && <VehicleLink vehicleId={live.vehicleId} className="bus-badge" />}
         </div>
       )}
       {takeover && <GuidanceTakeoverAlert takeover={takeover} arrival={takeoverArrival} live={live} currentMinute={currentMinute} />}
@@ -1191,7 +1222,7 @@ function GuidanceTakeoverAlert({ takeover, arrival, live, currentMinute }: { tak
     <div className={`guidance-action-takeover ${delayed ? "late" : early ? "early" : "on-time"}`}>
       <strong>Overname bij {takeover.entry.movement.van || "halte"}</strong>
       <span>
-        {vehicleId ? `Bus ${vehicleId} ` : "Bus "}
+        {vehicleId ? <><VehicleLink vehicleId={vehicleId} className="vehicle-inline-link">Bus {vehicleId}</VehicleLink>{" "}</> : "Bus "}
         {`aankomst ${predicted}${delayed || early ? ` (${formatHandoverDifference(delaySeconds)})` : ""}, ${formatDepartureWindow(minutesToDeparture, takeover.entry.movement.vertrek)}`}
       </span>
     </div>
@@ -1229,11 +1260,11 @@ function GuidanceTakeover({ takeover, live, arrival, past }: { takeover: Guidanc
         <span>{location} - gepland: aankomst {plannedArrival}, vertrek {movement.vertrek}</span>
       </div>
       {vehicleId && (
-        <div className="guidance-takeover-bus" title={`Bus ${vehicleId}`}>
+        <VehicleLink vehicleId={vehicleId} className="guidance-takeover-bus">
           <BusFront size={20} />
           <span>Bus</span>
           <strong>{vehicleId}</strong>
-        </div>
+        </VehicleLink>
       )}
       {movement.omloopnummer && (
         <div className="guidance-takeover-loop" title={`Omloop ${displayLoopNumber(movement.omloopnummer)}`}>
@@ -1287,6 +1318,19 @@ function TimelineChart({
   const liveStatusByMovementId = useMemo(() => new Map(liveStatuses.map((status) => [status.movementId, status])), [liveStatuses]);
   const currentMinute = currentTime ? currentTime.getHours() * 60 + currentTime.getMinutes() + currentTime.getSeconds() / 60 : undefined;
   const currentTimelineMinute = currentMinute === undefined ? undefined : alignCurrentMinute(currentMinute, range);
+  const selectedLoopVehicleId = useMemo(() => {
+    if (!selectedMovement?.omloopnummer) {
+      return undefined;
+    }
+    const selectedLoop = loopKey(selectedMovement);
+    const timedLoopMovements = movements
+      .filter((movement) => loopKey(movement) === selectedLoop)
+      .map((movement) => ({ movement, timing: getMovementTiming(movement) }))
+      .filter((item): item is { movement: Movement; timing: TimelineTiming } => item.timing !== undefined)
+      .sort((first, second) => first.timing.start - second.timing.start);
+
+    return liveInfoForLoop(timedLoopMovements, liveStatusByMovementId, currentTimelineMinute).vehicleId;
+  }, [currentTimelineMinute, liveStatusByMovementId, movements, selectedMovement]);
 
   useEffect(() => {
     const frame = frameRef.current;
@@ -1478,6 +1522,7 @@ function TimelineChart({
         <MovementDialog
           movement={selectedMovement}
           liveStatus={liveStatusByMovementId.get(selectedMovement.id)}
+          fallbackVehicleId={selectedLoopVehicleId}
           onClose={() => setSelectedMovement(undefined)}
         />
       )}
@@ -1530,7 +1575,11 @@ function TimelineRow({
     <>
       <div className="timeline-loop">
         <span>{displayLoopNumber(loop)}</span>
-        {currentLive.vehicleId && <small title={`Live voertuignummer: ${currentLive.vehicleId}`}>Bus {currentLive.vehicleId}</small>}
+        {currentLive.vehicleId && (
+          <VehicleLink vehicleId={currentLive.vehicleId} className="timeline-loop-vehicle">
+            Bus {currentLive.vehicleId}
+          </VehicleLink>
+        )}
         {currentLive.delaySeconds !== undefined && Math.abs(currentLive.delaySeconds) > 60 && (
           <em className={currentLive.delaySeconds > 0 ? "timeline-loop-delay late" : "timeline-loop-delay early"}>
             {currentLive.delaySeconds > 0 ? "+" : ""}{Math.round(currentLive.delaySeconds / 60)}
@@ -1693,13 +1742,17 @@ function MovementBlock({
 function MovementDialog({
   movement,
   liveStatus,
+  fallbackVehicleId,
   onClose,
 }: {
   movement: Movement;
   liveStatus?: LiveMovementStatus;
+  fallbackVehicleId?: string;
   onClose: () => void;
 }) {
   const delay = liveStatus?.delaySeconds;
+  const vehicleId = liveStatus?.vehicleId ?? fallbackVehicleId;
+  const hasDirectVehicleId = Boolean(liveStatus?.vehicleId);
   const hasDelay = delay !== undefined && Math.abs(delay) > 60;
 
   return (
@@ -1727,7 +1780,15 @@ function MovementDialog({
           <div className="movement-dialog-meta">
             <span>Dienst {movement.dienstnummer}</span>
             {movement.omloopnummer && <span>Omloop {displayLoopNumber(movement.omloopnummer)}</span>}
-            {liveStatus?.vehicleId && <span><BusFront size={16} /> Bus {liveStatus.vehicleId}</span>}
+            {vehicleId && (
+              <VehicleLink
+                vehicleId={vehicleId}
+                className={`movement-dialog-vehicle ${hasDirectVehicleId ? "is-live" : "is-derived"}`}
+                title={hasDirectVehicleId
+                  ? `Bus ${vehicleId} is live aan deze rit gekoppeld. Open op Busposities.nl`
+                  : `Bus ${vehicleId} is afgeleid van de actuele omloop. Open op Busposities.nl`}
+              />
+            )}
             {hasDelay && <span className="delay">{delay! > 0 ? "+" : ""}{Math.round(delay! / 60)} min</span>}
           </div>
         </div>

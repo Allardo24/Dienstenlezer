@@ -49,7 +49,7 @@ Een directe gegevensimport kan later worden toegevoegd als het opnieuw uploaden 
 
 Pas wanneer de lokale versie stabiel werkt:
 
-1. Wijzig in Cloudflared de aanvullende host voor `dienstenlezer.allardnet.nl` naar `http://<ip-van-home-assistant>:8080`.
+1. Wijzig in Cloudflared de aanvullende host voor DienstenLezer naar `http://<ip-van-home-assistant>:8080`.
 2. Herstart Cloudflared.
 3. Controleer de website via mobiele data.
 4. Laat de Windows-server nog enkele dagen beschikbaar, maar niet tegelijk achter hetzelfde domein.

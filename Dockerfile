@@ -36,7 +36,7 @@ LABEL io.hass.type="app" \
     io.hass.arch="${BUILD_ARCH}" \
     org.opencontainers.image.title="DienstenLezer" \
     org.opencontainers.image.description="Diensten-pdf's, omlopen en Qbuzz-livegegevens" \
-    org.opencontainers.image.source="https://dienstenlezer.allardnet.nl"
+    org.opencontainers.image.source="https://github.com/Allardo24/Dienstenlezer-HA"
 VOLUME ["/data"]
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \

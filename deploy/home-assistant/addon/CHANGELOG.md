@@ -1,5 +1,13 @@
 # Wijzigingen
 
+## 1.3.2
+
+- Livegegevens worden sneller gekoppeld en blijven kort lokaal beschikbaar na herladen.
+- De interface toont wanneer OVapi wordt ververst en waarschuwt bij verouderde gegevens.
+- Busnummers openen de bijbehorende voertuigpagina op Busposities.nl.
+- Ritdetails onderscheiden directe live-voertuignummers van afgeleide omlopinformatie.
+- De live-status in Dienstbegeleiding is op mobiele schermen compacter gemaakt.
+
 ## 1.3.1
 
 - Open Web UI werkt via Home Assistant Ingress, ook via een externe Home Assistant-verbinding.
