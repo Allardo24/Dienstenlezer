@@ -702,6 +702,32 @@ h2 {
   cursor: pointer;
 }
 
+.movement-block.continues-next {
+  border-right-width: 0;
+  border-radius: 8px 0 0 8px;
+  overflow: visible;
+}
+
+.movement-block.continues-previous {
+  border-left-width: 0;
+  border-radius: 0 8px 8px 0;
+}
+
+.movement-block.continues-previous.continues-next {
+  border-radius: 0;
+}
+
+.movement-block.continues-previous:not(.is-expanded) .movement-line-number {
+  visibility: hidden;
+}
+
+.movement-block.continues-next:not(.continues-previous) .movement-line-number {
+  width: max-content;
+  overflow: visible;
+  font-size: 1.2rem;
+  z-index: 2;
+}
+
 .movement-block:focus-visible {
   outline: 3px solid #0f8998;
   outline-offset: 2px;

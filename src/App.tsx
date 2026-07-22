@@ -18,6 +18,7 @@ import {
   X,
 } from "lucide-react";
 import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, isDesktopLiveAvailable, listenToQbuzzSyncProgress, plannedMarkerMinute } from "./live";
+import { hasInterveningDriver, type DutyVehicleInterval } from "./guidanceLogic";
 import {
   createPdfContentHash,
   createStoredFileId,
@@ -993,7 +994,7 @@ function DutyGuidance({
     : entries.findIndex((entry) => entry.timing.start > currentMinute);
   const currentEntry = currentIndex >= 0 ? entries[currentIndex] : undefined;
   const nextEntry = nextIndex >= 0 && nextIndex < entries.length ? entries[nextIndex] : undefined;
-  const takeoversByMovementId = buildGuidanceTakeovers(entries);
+  const takeoversByMovementId = buildGuidanceTakeovers(entries, movements);
   const currentLive = currentEntry ? guidanceLiveInfo(currentEntry, statusByMovementId, loopSnapshots, currentMinute, true) : {};
   const nextLive = nextEntry ? guidanceLiveInfo(nextEntry, statusByMovementId, loopSnapshots, currentMinute, true) : {};
   const currentTakeover = currentEntry ? takeoversByMovementId.get(currentEntry.movement.id) : undefined;
@@ -1231,6 +1232,11 @@ function GuidanceTakeoverAlert({ takeover, arrival, live, currentMinute }: { tak
 
 function GuidanceTakeover({ takeover, live, arrival, past }: { takeover: GuidanceTakeover; live: GuidanceLiveInfo; arrival?: TakeoverArrivalInfo; past: boolean }) {
   const { movement } = takeover.entry;
+  const hasArrivalData = arrival?.expectedAt !== undefined
+    || arrival?.delaySeconds !== undefined
+    || live.handoverExpectedAt !== undefined
+    || live.handoverDelaySeconds !== undefined
+    || live.delaySeconds !== undefined;
   const delaySeconds = arrival?.delaySeconds ?? live.handoverDelaySeconds ?? live.delaySeconds ?? 0;
   const rawDelayed = delaySeconds > 60;
   const early = delaySeconds < -60;
@@ -1253,7 +1259,7 @@ function GuidanceTakeover({ takeover, live, arrival, past }: { takeover: Guidanc
   const delayed = rawDelayed && minutesToDeparture <= 7;
 
   return (
-    <li className={`guidance-takeover ${delayed ? "late" : early ? "early" : "on-time"}${past ? " past" : ""}${vehicleId ? " has-bus" : ""}${movement.omloopnummer ? " has-loop" : ""}`}>
+    <li className={`guidance-takeover${hasArrivalData ? ` ${delayed ? "late" : early ? "early" : "on-time"}` : ""}${past ? " past" : ""}${vehicleId ? " has-bus" : ""}${movement.omloopnummer ? " has-loop" : ""}`}>
       <span className="guidance-takeover-rail" aria-hidden="true" />
       <div className="guidance-takeover-info">
         <strong>Overname</strong>
@@ -1272,14 +1278,16 @@ function GuidanceTakeover({ takeover, live, arrival, past }: { takeover: Guidanc
           <strong>{displayLoopNumber(movement.omloopnummer)}</strong>
         </div>
       )}
-      <div className="guidance-takeover-status">
-        <span>{delayed ? "Te laat" : early ? "Te vroeg" : "Op tijd"}</span>
-        <strong>
-          {delayed || early
-            ? `${timingLabel} ${expectedArrival} (${formatHandoverDifference(delaySeconds)})`
-            : `${timingLabel} ${expectedArrival}`}
-        </strong>
-      </div>
+      {hasArrivalData && (
+        <div className="guidance-takeover-status">
+          <span>{delayed ? "Te laat" : early ? "Te vroeg" : "Op tijd"}</span>
+          <strong>
+            {delayed || early
+              ? `${timingLabel} ${expectedArrival} (${formatHandoverDifference(delaySeconds)})`
+              : `${timingLabel} ${expectedArrival}`}
+          </strong>
+        </div>
+      )}
     </li>
   );
 }
@@ -1556,6 +1564,9 @@ function TimelineRow({
     .filter((item): item is { movement: Movement; timing: TimelineTiming } => item.timing !== undefined)
     .sort((a, b) => a.timing.start - b.timing.start);
   const serviceSpans = buildServiceSpans(timedMovements);
+  const splitTripConnections = buildSplitTripConnections(timedMovements);
+  const continuesFromPrevious = new Set(splitTripConnections.map((connection) => connection.toMovementId));
+  const continuesToNext = new Set(splitTripConnections.map((connection) => connection.fromMovementId));
   const currentLive = liveInfoForLoop(timedMovements, liveStatusByMovementId, currentTimelineMinute);
   const delayMarkers = timedMovements.flatMap(({ movement, timing }) => {
     const status = liveStatusByMovementId.get(movement.id);
@@ -1612,6 +1623,8 @@ function TimelineRow({
             movement={movement}
             left={(timing.start - rangeStart) * minuteWidth}
             width={(timing.end - timing.start) * minuteWidth}
+            continuesFromPrevious={continuesFromPrevious.has(movement.id)}
+            continuesToNext={continuesToNext.has(movement.id)}
             onSelect={onSelectMovement}
           />
         ))}
@@ -1659,11 +1672,15 @@ function MovementBlock({
   movement,
   left,
   width,
+  continuesFromPrevious,
+  continuesToNext,
   onSelect,
 }: {
   movement: Movement;
   left: number;
   width: number;
+  continuesFromPrevious: boolean;
+  continuesToNext: boolean;
   onSelect: (movement: Movement) => void;
 }) {
   const hoverTimer = useRef<number | undefined>(undefined);
@@ -1706,7 +1723,13 @@ function MovementBlock({
 
   return (
     <article
-      className={`movement-block type-${movement.type}${isExpanded ? " is-expanded" : ""}`}
+      className={[
+        "movement-block",
+        `type-${movement.type}`,
+        continuesFromPrevious ? "continues-previous" : "",
+        continuesToNext ? "continues-next" : "",
+        isExpanded ? "is-expanded" : "",
+      ].filter(Boolean).join(" ")}
       style={{
         left: `${left}px`,
         width: `${expandedWidth ?? displayWidth}px`,
@@ -1935,6 +1958,52 @@ type ServiceSpan = {
   end: number;
 };
 
+type SplitTripConnection = {
+  fromMovementId: string;
+  toMovementId: string;
+};
+
+function buildSplitTripConnections(
+  timedMovements: { movement: Movement; timing: TimelineTiming }[],
+): SplitTripConnection[] {
+  return timedMovements.slice(0, -1).flatMap((current, index) => {
+    const next = timedMovements[index + 1];
+    const gapMinutes = next.timing.start - current.timing.end;
+    const currentLine = normaliseTimelineLine(current.movement.lijnnummer);
+    const nextLine = normaliseTimelineLine(next.movement.lijnnummer);
+    const currentTrip = normaliseTimelineIdentifier(current.movement.ritnummer);
+    const nextTrip = normaliseTimelineIdentifier(next.movement.ritnummer);
+
+    if (
+      current.movement.type !== "rit"
+      || next.movement.type !== "rit"
+      || gapMinutes < 0
+      || gapMinutes > 10
+      || !currentLine
+      || currentLine !== nextLine
+      || !currentTrip
+      || currentTrip !== nextTrip
+      || !sameGuidanceStop(current.movement.naar, next.movement.van)
+    ) {
+      return [];
+    }
+
+    return [{
+      fromMovementId: current.movement.id,
+      toMovementId: next.movement.id,
+    }];
+  });
+}
+
+function normaliseTimelineIdentifier(value: string | undefined): string {
+  return (value ?? "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function normaliseTimelineLine(value: string | undefined): string {
+  const line = normaliseTimelineIdentifier(value);
+  return /^l\d+$/.test(line) ? line.slice(1) : line;
+}
+
 function alignCurrentMinute(minute: number, range: TimelineTiming): number {
   if (range.end > 24 * 60 && minute < range.start % (24 * 60)) {
     return minute + 24 * 60;
@@ -2017,9 +2086,9 @@ function buildGuidanceEntries(movements: Movement[], dutyStart: string | undefin
     .sort((first, second) => first.timing.start - second.timing.start || first.timing.end - second.timing.end);
 }
 
-function buildGuidanceTakeovers(entries: GuidanceEntry[]): Map<string, GuidanceTakeover> {
+function buildGuidanceTakeovers(entries: GuidanceEntry[], allMovements: Movement[]): Map<string, GuidanceTakeover> {
   const takeovers = new Map<string, GuidanceTakeover>();
-  let previousLoop: string | undefined;
+  let previousVehicleEntry: GuidanceEntry | undefined;
 
   for (const entry of entries) {
     if (!isVehicleTimelineMovement(entry.movement)) {
@@ -2027,13 +2096,58 @@ function buildGuidanceTakeovers(entries: GuidanceEntry[]): Map<string, GuidanceT
     }
 
     const loop = loopKey(entry.movement);
-    if (loop !== previousLoop) {
+    const previousLoop = previousVehicleEntry ? loopKey(previousVehicleEntry.movement) : undefined;
+    const returnedAfterOtherDriver = previousVehicleEntry !== undefined
+      && loop === previousLoop
+      && hasInterveningDriverOnLoop(previousVehicleEntry, entry, allMovements);
+
+    if (loop !== previousLoop || returnedAfterOtherDriver) {
       takeovers.set(entry.movement.id, { entry });
-      previousLoop = loop;
     }
+
+    previousVehicleEntry = entry;
   }
 
   return takeovers;
+}
+
+function hasInterveningDriverOnLoop(
+  previousEntry: GuidanceEntry,
+  currentEntry: GuidanceEntry,
+  allMovements: Movement[],
+): boolean {
+  const loop = compactLoopNumber(currentEntry.movement.omloopnummer);
+  const previousLoop = compactLoopNumber(previousEntry.movement.omloopnummer);
+  if (!loop || !previousLoop) {
+    return false;
+  }
+
+  const intervalFor = (entry: GuidanceEntry): DutyVehicleInterval => ({
+    loop: compactLoopNumber(entry.movement.omloopnummer) ?? "",
+    serviceNumber: entry.movement.dienstnummer,
+    start: entry.timing.start,
+    end: entry.timing.end,
+  });
+  const candidates = allMovements.flatMap((movement): DutyVehicleInterval[] => {
+    if (!isVehicleTimelineMovement(movement)) {
+      return [];
+    }
+
+    const candidateLoop = compactLoopNumber(movement.omloopnummer);
+    const timing = alignTimingToTarget(getMovementTiming(movement), currentEntry.timing.start);
+    if (!candidateLoop || !timing) {
+      return [];
+    }
+
+    return [{
+      loop: candidateLoop,
+      serviceNumber: movement.dienstnummer,
+      start: timing.start,
+      end: timing.end,
+    }];
+  });
+
+  return hasInterveningDriver(intervalFor(previousEntry), intervalFor(currentEntry), candidates);
 }
 
 function findTakeoverArrival(

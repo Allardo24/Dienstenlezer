@@ -1,5 +1,11 @@
 # Wijzigingen
 
+## 1.3.3
+
+- Ritdelen die door een chauffeurswissel zijn gesplitst worden in het omloopoverzicht als een herkenbaar geheel weergegeven.
+- Dienstbegeleiding toont opnieuw een overname wanneer een andere chauffeur tijdens de pauze met dezelfde omloop heeft gereden.
+- Overnameblokken tonen geen status of geschatte aankomst zolang daarvoor geen livegegevens beschikbaar zijn.
+
 ## 1.3.2
 
 - Livegegevens worden sneller gekoppeld en blijven kort lokaal beschikbaar na herladen.
