@@ -1,20 +1,35 @@
 import type {
+  AdminSettings,
   DaySegment,
   StoredPdfCatalog,
   StoredPdfFile,
   StoredPdfFileSummary,
   StoredSchedule,
+  OrganizationConfig,
 } from "./types";
 import { serverUrl } from "./serverUrl";
+import {
+  DEFAULT_DIVISION_ID,
+  DEFAULT_ORGANIZATION,
+  LEGACY_DEFAULT_ID,
+  normalizeOrganization,
+  scheduleSelectionKey,
+} from "./organization";
+import {
+  normaliseBuslessActions,
+  readBuslessActions,
+  writeBuslessActions,
+} from "./buslessActions";
 
 const DB_NAME = "dienstenlezer";
 const DB_VERSION = 1;
 const FILE_STORE = "pdfFiles";
 const CACHE_DB_NAME = "dienstenlezer-server-cache";
-const CACHE_DB_VERSION = 1;
+const CACHE_DB_VERSION = 2;
 const CATALOG_STORE = "catalog";
 const SCHEDULE_STORE = "schedules";
-const STORAGE_SCHEMA_VERSION = 2;
+const STORAGE_SCHEMA_VERSION = 3;
+const ORGANIZATION_STORAGE_KEY = "dienstenlezer-organization-v1";
 
 function usesServerStorage(): boolean {
   return typeof window !== "undefined" && !("__TAURI_INTERNALS__" in window);
@@ -54,8 +69,14 @@ function openCacheDatabase(): Promise<IDBDatabase> {
       if (!db.objectStoreNames.contains(CATALOG_STORE)) {
         db.createObjectStore(CATALOG_STORE);
       }
+      if (
+        db.objectStoreNames.contains(SCHEDULE_STORE)
+        && request.transaction?.objectStore(SCHEDULE_STORE).keyPath !== "key"
+      ) {
+        db.deleteObjectStore(SCHEDULE_STORE);
+      }
       if (!db.objectStoreNames.contains(SCHEDULE_STORE)) {
-        db.createObjectStore(SCHEDULE_STORE, { keyPath: "segment" });
+        db.createObjectStore(SCHEDULE_STORE, { keyPath: "key" });
       }
     };
 
@@ -118,36 +139,45 @@ export async function getStoredPdfCatalog(): Promise<StoredPdfCatalog> {
 
 export async function getCachedStoredData(
   segment: DaySegment,
+  divisionIds: string[],
 ): Promise<{ catalog: StoredPdfCatalog; schedule: StoredSchedule } | undefined> {
   if (!usesServerStorage()) {
     return undefined;
   }
 
+  const key = scheduleSelectionKey(segment, divisionIds);
   const [catalog, schedule] = await Promise.all([
     readCacheValue<StoredPdfCatalog>(CATALOG_STORE, "current"),
-    readCacheValue<StoredSchedule>(SCHEDULE_STORE, segment),
+    readCacheValue<StoredSchedule>(SCHEDULE_STORE, key),
   ]);
   if (
     catalog?.schemaVersion !== STORAGE_SCHEMA_VERSION ||
     schedule?.schemaVersion !== STORAGE_SCHEMA_VERSION ||
-    schedule.revision !== catalog.segmentRevisions[segment]
+    schedule.catalogRevision !== catalog.revision
   ) {
     return undefined;
   }
   return { catalog, schedule };
 }
 
-export async function getStoredSchedule(segment: DaySegment, expectedRevision: string): Promise<StoredSchedule> {
+export async function getStoredSchedule(
+  segment: DaySegment,
+  divisionIds: string[],
+  catalogRevision: string,
+): Promise<StoredSchedule> {
+  const normalizedDivisionIds = [...new Set(divisionIds)].sort();
+  const key = scheduleSelectionKey(segment, normalizedDivisionIds);
   if (usesServerStorage()) {
-    const cached = await readCacheValue<StoredSchedule>(SCHEDULE_STORE, segment);
-    if (cached?.schemaVersion === STORAGE_SCHEMA_VERSION && cached.revision === expectedRevision) {
+    const cached = await readCacheValue<StoredSchedule>(SCHEDULE_STORE, key);
+    if (cached?.schemaVersion === STORAGE_SCHEMA_VERSION && cached.catalogRevision === catalogRevision) {
       return cached;
     }
 
     try {
-      const response = await serverRequest(`/api/schedules/${encodeURIComponent(segment)}`, { cache: "no-cache" });
+      const params = new URLSearchParams({ divisions: normalizedDivisionIds.join(",") });
+      const response = await serverRequest(`/api/schedules/${encodeURIComponent(segment)}?${params}`, { cache: "no-cache" });
       const schedule = await response.json() as StoredSchedule;
-      await writeCacheValue(SCHEDULE_STORE, segment, schedule);
+      await writeCacheValue(SCHEDULE_STORE, key, schedule);
       return schedule;
     } catch (error) {
       if (cached?.schemaVersion === STORAGE_SCHEMA_VERSION) {
@@ -160,9 +190,14 @@ export async function getStoredSchedule(segment: DaySegment, expectedRevision: s
   const files = await getLocalStoredPdfFiles();
   return {
     schemaVersion: STORAGE_SCHEMA_VERSION,
+    key,
     segment,
-    revision: localSegmentRevision(files, segment),
-    results: files.filter((file) => file.enabled && file.daySegment === segment).map((file) => file.parseResult),
+    divisionIds: normalizedDivisionIds,
+    catalogRevision,
+    revision: localSegmentRevision(files, segment, normalizedDivisionIds),
+    results: files
+      .filter((file) => file.enabled && file.daySegment === segment && normalizedDivisionIds.includes(file.divisionId))
+      .map((file) => file.parseResult),
   };
 }
 
@@ -179,6 +214,7 @@ export async function saveStoredPdfFile(file: StoredPdfFile): Promise<void> {
       uploadedAt: file.uploadedAt,
       enabled: file.enabled,
       daySegment: file.daySegment,
+      divisionId: file.divisionId,
       contentHash: file.contentHash,
       parseResult: file.parseResult,
     };
@@ -217,6 +253,50 @@ export async function updateStoredPdfFileDaySegment(id: string, daySegment: DayS
   await updateLocalFile(id, (file) => ({ ...file, daySegment }));
 }
 
+export async function updateStoredPdfFileDivision(id: string, divisionId: string): Promise<void> {
+  if (usesServerStorage()) {
+    await updateServerFile(id, { divisionId });
+    return;
+  }
+  await updateLocalFile(id, (file) => ({ ...file, divisionId }));
+}
+
+export async function saveOrganizationConfig(config: OrganizationConfig): Promise<OrganizationConfig> {
+  const normalized = normalizeOrganization(config);
+  if (usesServerStorage()) {
+    const response = await serverRequest("/api/organization", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(normalized),
+    });
+    return normalizeOrganization(await response.json() as OrganizationConfig);
+  }
+
+  window.localStorage.setItem(ORGANIZATION_STORAGE_KEY, JSON.stringify(normalized));
+  return normalized;
+}
+
+export async function saveAdminSettings(settings: AdminSettings): Promise<AdminSettings> {
+  const normalized = {
+    buslessActions: normaliseBuslessActions(settings.buslessActions),
+  };
+  if (usesServerStorage()) {
+    const response = await serverRequest("/api/settings", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(normalized),
+    });
+    const saved = await response.json() as AdminSettings;
+    return {
+      buslessActions: normaliseBuslessActions(saved.buslessActions),
+    };
+  }
+
+  return {
+    buslessActions: writeBuslessActions(normalized.buslessActions),
+  };
+}
+
 export async function deleteStoredPdfFile(id: string): Promise<void> {
   if (usesServerStorage()) {
     await serverRequest(`/api/files/${encodeURIComponent(id)}`, { method: "DELETE" });
@@ -244,7 +324,13 @@ async function getLocalStoredPdfFiles(): Promise<StoredPdfFile[]> {
     request.onsuccess = () => {
       resolve(
         (request.result as StoredPdfFile[])
-          .map((file) => ({ ...file, daySegment: file.daySegment ?? "unassigned" }))
+          .map((file) => ({
+            ...file,
+            daySegment: file.daySegment ?? "unassigned",
+            divisionId: !file.divisionId || file.divisionId === LEGACY_DEFAULT_ID
+              ? DEFAULT_DIVISION_ID
+              : file.divisionId,
+          }))
           .sort((first, second) => second.uploadedAt - first.uploadedAt || first.name.localeCompare(second.name, "nl", { numeric: true })),
       );
     };
@@ -255,22 +341,29 @@ async function getLocalStoredPdfFiles(): Promise<StoredPdfFile[]> {
 
 function localCatalog(files: StoredPdfFile[]): StoredPdfCatalog {
   const summaries = files.map(toSummary);
+  const organization = readLocalOrganization();
+  const adminSettings = {
+    buslessActions: readBuslessActions(),
+  };
   return {
     schemaVersion: STORAGE_SCHEMA_VERSION,
-    revision: `local-${files.map((file) => `${file.id}:${file.enabled}:${file.daySegment}`).join("|")}`,
+    revision: `local-${files.map((file) => `${file.id}:${file.enabled}:${file.daySegment}:${file.divisionId}`).join("|")}-${JSON.stringify(organization)}`,
     segmentRevisions: {
       weekday: localSegmentRevision(files, "weekday"),
       saturday: localSegmentRevision(files, "saturday"),
       sunday: localSegmentRevision(files, "sunday"),
       unassigned: localSegmentRevision(files, "unassigned"),
     },
+    organization,
+    adminSettings,
     files: summaries,
   };
 }
 
-function localSegmentRevision(files: StoredPdfFile[], segment: DaySegment): string {
+function localSegmentRevision(files: StoredPdfFile[], segment: DaySegment, divisionIds?: string[]): string {
+  const selected = divisionIds ? new Set(divisionIds) : undefined;
   return `local-${segment}-${files
-    .filter((file) => file.enabled && file.daySegment === segment)
+    .filter((file) => file.enabled && file.daySegment === segment && (!selected || selected.has(file.divisionId)))
     .map((file) => `${file.id}:${file.lastModified}`)
     .join("|")}`;
 }
@@ -284,6 +377,7 @@ function toSummary(file: StoredPdfFile): StoredPdfFileSummary {
     uploadedAt: file.uploadedAt,
     enabled: file.enabled,
     daySegment: file.daySegment,
+    divisionId: file.divisionId,
     contentHash: file.contentHash,
     serviceCount: file.parseResult.diensten.length,
     movementCount: file.parseResult.movements.length,
@@ -311,12 +405,24 @@ async function updateLocalFile(id: string, update: (file: StoredPdfFile) => Stor
   });
 }
 
-async function updateServerFile(id: string, patch: { enabled?: boolean; daySegment?: DaySegment }): Promise<void> {
+async function updateServerFile(
+  id: string,
+  patch: { enabled?: boolean; daySegment?: DaySegment; divisionId?: string },
+): Promise<void> {
   await serverRequest(`/api/files/${encodeURIComponent(id)}`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(patch),
   });
+}
+
+function readLocalOrganization(): OrganizationConfig {
+  try {
+    const stored = window.localStorage.getItem(ORGANIZATION_STORAGE_KEY);
+    return normalizeOrganization(stored ? JSON.parse(stored) as OrganizationConfig : DEFAULT_ORGANIZATION);
+  } catch {
+    return structuredClone(DEFAULT_ORGANIZATION);
+  }
 }
 
 async function readCacheValue<T>(storeName: string, key: IDBValidKey): Promise<T | undefined> {

@@ -56,7 +56,7 @@ Pas wanneer de lokale versie stabiel werkt:
 
 ## Terugrollen
 
-Werkt de Home Assistant-versie niet goed, zet dan alleen de Cloudflared-host terug naar `http://192.168.68.130:8080` en start de Windows-server. De Windows-data is tijdens de proef niet aangepast of verwijderd.
+Werkt de Home Assistant-versie niet goed, zet dan alleen de Cloudflared-host terug naar `http://<windows-server-ip>:8080` en start de Windows-server. De Windows-data is tijdens de proef niet aangepast of verwijderd.
 
 ## Vooraf gebouwde updates
 

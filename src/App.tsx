@@ -1,9 +1,8 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import {
   AlertTriangle,
   BusFront,
   Clock3,
-  Database,
   Download,
   Eye,
   EyeOff,
@@ -11,14 +10,19 @@ import {
   LockOpen,
   Loader2,
   Navigation,
+  Plus,
+  RotateCcw,
   Search,
+  Settings,
   Table2,
   Trash2,
   Upload,
   X,
 } from "lucide-react";
 import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, isDesktopLiveAvailable, listenToQbuzzSyncProgress, plannedMarkerMinute } from "./live";
-import { hasInterveningDriver, type DutyVehicleInterval } from "./guidanceLogic";
+import { hasInterveningDriver, toOperationalMinute, type DutyVehicleInterval } from "./guidanceLogic";
+import { isBuslessDriverRow, withoutLegacyOvChipNumber } from "./pdfColumns";
+import { DEFAULT_BUSLESS_ACTIONS, normaliseBuslessActions } from "./buslessActions";
 import {
   createPdfContentHash,
   createStoredFileId,
@@ -27,18 +31,31 @@ import {
   getCachedStoredData,
   getStoredPdfCatalog,
   getStoredSchedule,
+  saveAdminSettings,
   saveStoredPdfFile,
+  saveOrganizationConfig,
   updateStoredPdfFileDaySegment,
+  updateStoredPdfFileDivision,
   updateStoredPdfFileEnabled,
 } from "./storage";
+import {
+  DEFAULT_DIVISION_ID,
+  DEFAULT_ORGANIZATION,
+  normalizeOrganization,
+  organizationItemId,
+  scheduleSelectionKey,
+} from "./organization";
 import type {
+  Concession,
   DaySegment,
   Dienst,
+  Division,
   LiveMovementRequest,
   LiveMovementStatus,
   LiveStatusResponse,
   LiveSyncState,
   Movement,
+  OrganizationConfig,
   ParseResult,
   StoredPdfFile,
   StoredPdfFileSummary,
@@ -48,7 +65,8 @@ const EMPTY_RESULTS: ParseResult[] = [];
 const DESKTOP_LOOP_COLUMN_WIDTH = 170;
 const MOBILE_LOOP_COLUMN_WIDTH = 84;
 const GUIDANCE_LOCK_KEY = "dienstenlezer-locked-guidance-service";
-type Page = "loops" | "services" | "guidance" | "files";
+const SELECTED_DIVISIONS_KEY = "dienstenlezer-selected-divisions-v1";
+type Page = "loops" | "services" | "guidance" | "settings";
 
 const DAY_SEGMENTS: { id: DaySegment; label: string; description: string }[] = [
   { id: "weekday", label: "Ma-vr", description: "Werkdagen" },
@@ -77,8 +95,27 @@ function writeLockedGuidanceService(serviceNumber?: string) {
   }
 }
 
-function cachedLiveResponse(date: string): LiveStatusResponse | undefined {
-  const cached = getCachedQbuzzLiveStatuses(date);
+function readSelectedDivisions(): string[] {
+  try {
+    const stored = JSON.parse(window.localStorage.getItem(SELECTED_DIVISIONS_KEY) ?? "[]") as unknown;
+    return Array.isArray(stored) && stored.every((item) => typeof item === "string")
+      ? stored.filter(Boolean)
+      : [];
+  } catch {
+    return [];
+  }
+}
+
+function writeSelectedDivisions(divisionIds: string[]) {
+  try {
+    window.localStorage.setItem(SELECTED_DIVISIONS_KEY, JSON.stringify(divisionIds));
+  } catch {
+    // De selectie blijft voor deze sessie werken als browseropslag niet beschikbaar is.
+  }
+}
+
+function cachedLiveResponse(date: string, divisionIds: string[] = []): LiveStatusResponse | undefined {
+  const cached = getCachedQbuzzLiveStatuses(date, divisionIds);
   if (!cached) {
     return undefined;
   }
@@ -95,7 +132,7 @@ function cachedLiveResponse(date: string): LiveStatusResponse | undefined {
 }
 
 function initialLiveResponse(): LiveStatusResponse {
-  return cachedLiveResponse(todayInputValue()) ?? {
+  return cachedLiveResponse(todayInputValue(), readSelectedDivisions()) ?? {
     statuses: [],
     sync: { state: "unavailable", message: "Live status wordt gestart." },
   };
@@ -104,8 +141,11 @@ function initialLiveResponse(): LiveStatusResponse {
 function App() {
   const inputRef = useRef<HTMLInputElement | null>(null);
   const storageRequestIdRef = useRef(0);
-  const previousDaySegmentRef = useRef<DaySegment | undefined>(undefined);
+  const previousScheduleScopeRef = useRef<string | undefined>(undefined);
   const [storedFiles, setStoredFiles] = useState<StoredPdfFileSummary[]>([]);
+  const [organization, setOrganization] = useState<OrganizationConfig>(() => structuredClone(DEFAULT_ORGANIZATION));
+  const [selectedDivisionIds, setSelectedDivisionIds] = useState(readSelectedDivisions);
+  const [uploadDivisionId, setUploadDivisionId] = useState(DEFAULT_DIVISION_ID);
   const [results, setResults] = useState<ParseResult[]>(EMPTY_RESULTS);
   const [page, setPage] = useState<Page>(() => readLockedGuidanceService() ? "guidance" : "loops");
   const [selectedDate, setSelectedDate] = useState(() => todayInputValue());
@@ -122,9 +162,19 @@ function App() {
   const [liveResponse, setLiveResponse] = useState<LiveStatusResponse>(initialLiveResponse);
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [isPageVisible, setIsPageVisible] = useState(() => document.visibilityState !== "hidden");
+  const [buslessActions, setBuslessActions] = useState<string[]>([...DEFAULT_BUSLESS_ACTIONS]);
 
   const selectedDaySegment = useMemo(() => daySegmentForDate(selectedDate), [selectedDate]);
-  const allMovements = useMemo(() => results.flatMap((result) => result.movements), [results]);
+  const selectedScheduleScope = useMemo(
+    () => scheduleSelectionKey(selectedDaySegment, selectedDivisionIds),
+    [selectedDaySegment, selectedDivisionIds],
+  );
+  const allMovements = useMemo(
+    () => results
+      .flatMap((result) => result.movements)
+      .map(normaliseStoredMovement),
+    [results],
+  );
   const allDiensten = useMemo(() => results.flatMap((result) => result.diensten), [results]);
   const warnings = useMemo(() => results.flatMap((result) => result.warnings), [results]);
   const liveVehicleQueryLoops = useMemo(() => {
@@ -181,8 +231,14 @@ function App() {
 
   const allServices = useMemo(() => orderedDiensten(allDiensten, allMovements), [allDiensten, allMovements]);
   const services = useMemo(() => orderedDiensten(allDiensten, filteredMovements), [allDiensten, filteredMovements]);
-  const timelineMovements = useMemo(() => filteredMovements.filter(isVehicleTimelineMovement), [filteredMovements]);
-  const liveTimelineMovements = useMemo(() => allMovements.filter(isVehicleTimelineMovement), [allMovements]);
+  const timelineMovements = useMemo(
+    () => filteredMovements.filter((movement) => isVehicleTimelineMovement(movement, buslessActions)),
+    [buslessActions, filteredMovements],
+  );
+  const liveTimelineMovements = useMemo(
+    () => allMovements.filter((movement) => isVehicleTimelineMovement(movement, buslessActions)),
+    [allMovements, buslessActions],
+  );
   const timelineLoops = useMemo(() => orderedLoops(timelineMovements), [timelineMovements]);
   const isToday = selectedDate === todayInputValue();
   const desktopLiveAvailable = isDesktopLiveAvailable();
@@ -206,16 +262,16 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (previousDaySegmentRef.current === undefined) {
-      previousDaySegmentRef.current = selectedDaySegment;
+    if (previousScheduleScopeRef.current === undefined) {
+      previousScheduleScopeRef.current = selectedScheduleScope;
       return;
     }
 
-    if (previousDaySegmentRef.current !== selectedDaySegment) {
-      previousDaySegmentRef.current = selectedDaySegment;
+    if (previousScheduleScopeRef.current !== selectedScheduleScope) {
+      previousScheduleScopeRef.current = selectedScheduleScope;
       void reloadStoredFiles();
     }
-  }, [selectedDaySegment]);
+  }, [selectedScheduleScope]);
 
   useEffect(() => {
     if (!desktopLiveAvailable) {
@@ -257,7 +313,7 @@ function App() {
 
     setLiveResponse((current) => current.statuses.length > 0
       ? current
-      : cachedLiveResponse(selectedDate) ?? current);
+      : cachedLiveResponse(selectedDate, selectedDivisionIds) ?? current);
 
     if (!isPageVisible) {
       return;
@@ -295,7 +351,7 @@ function App() {
               : "Eerste Qbuzz-livegegevens ophalen...",
           },
         }));
-        const response = await getQbuzzLiveStatuses(selectedDate, requestMovements);
+        const response = await getQbuzzLiveStatuses(selectedDate, requestMovements, selectedDivisionIds);
         if (!cancelled) {
           setLiveResponse(response);
           timer = window.setTimeout(() => void refreshLiveStatuses(), 30_000);
@@ -322,25 +378,42 @@ function App() {
         window.clearTimeout(timer);
       }
     };
-  }, [desktopLiveAvailable, isPageVisible, isToday, liveRequested, liveTimelineMovements, selectedDate]);
+  }, [desktopLiveAvailable, isPageVisible, isToday, liveRequested, liveTimelineMovements, selectedDate, selectedScheduleScope]);
 
-  async function reloadStoredFiles() {
+  async function reloadStoredFiles(requestedDivisionIds = selectedDivisionIds) {
     const requestId = ++storageRequestIdRef.current;
     setIsLoadingFiles(true);
     setStorageError(undefined);
     try {
-      const cached = await getCachedStoredData(selectedDaySegment);
+      const cached = await getCachedStoredData(selectedDaySegment, requestedDivisionIds);
       if (cached && requestId === storageRequestIdRef.current) {
+        setOrganization(normalizeOrganization(cached.catalog.organization));
+        setBuslessActions(normaliseBuslessActions(
+          cached.catalog.adminSettings?.buslessActions ?? [...DEFAULT_BUSLESS_ACTIONS],
+        ));
         setStoredFiles(cached.catalog.files);
         setResults(cached.schedule.results);
         setIsLoadingFiles(false);
       }
       const catalog = await getStoredPdfCatalog();
-      const schedule = await getStoredSchedule(selectedDaySegment, catalog.segmentRevisions[selectedDaySegment]);
+      const normalizedOrganization = normalizeOrganization(catalog.organization);
+      const effectiveDivisionIds = resolveSelectedDivisionIds(requestedDivisionIds, normalizedOrganization);
+      const schedule = await getStoredSchedule(selectedDaySegment, effectiveDivisionIds, catalog.revision);
       if (requestId !== storageRequestIdRef.current) {
         return;
       }
       setStoredFiles(catalog.files);
+      setOrganization(normalizedOrganization);
+      setBuslessActions(normaliseBuslessActions(
+        catalog.adminSettings?.buslessActions ?? [...DEFAULT_BUSLESS_ACTIONS],
+      ));
+      if (!sameStringSet(selectedDivisionIds, effectiveDivisionIds)) {
+        setSelectedDivisionIds(effectiveDivisionIds);
+        writeSelectedDivisions(effectiveDivisionIds);
+      }
+      if (uploadDivisionId && !normalizedOrganization.divisions.some((division) => division.id === uploadDivisionId)) {
+        setUploadDivisionId(DEFAULT_DIVISION_ID);
+      }
       setResults(schedule.results);
     } catch (error) {
       if (requestId === storageRequestIdRef.current) {
@@ -379,6 +452,7 @@ function App() {
           uploadedAt: Date.now(),
           enabled: true,
           daySegment: "unassigned" as const,
+          divisionId: uploadDivisionId,
           contentHash,
           file,
           parseResult: parsedResults[index],
@@ -399,6 +473,16 @@ function App() {
 
   function exportCsv() {
     downloadText("dienstenlezer-omlopen.csv", movementsToCsv(filteredMovements));
+  }
+
+  async function updateBuslessActions(actions: string[]) {
+    setStorageError(undefined);
+    try {
+      const saved = await saveAdminSettings({ buslessActions: actions });
+      setBuslessActions(saved.buslessActions);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function resetView() {
@@ -428,6 +512,34 @@ function App() {
     await reloadStoredFiles();
   }
 
+  async function moveStoredFileToDivision(file: StoredPdfFileSummary, divisionId: string) {
+    await updateStoredPdfFileDivision(file.id, divisionId);
+    await reloadStoredFiles();
+  }
+
+  async function updateOrganization(organizationConfig: OrganizationConfig) {
+    setStorageError(undefined);
+    try {
+      const saved = await saveOrganizationConfig(organizationConfig);
+      const effectiveDivisionIds = resolveSelectedDivisionIds(selectedDivisionIds, saved);
+      setOrganization(saved);
+      setSelectedDivisionIds(effectiveDivisionIds);
+      writeSelectedDivisions(effectiveDivisionIds);
+      if (uploadDivisionId && !saved.divisions.some((division) => division.id === uploadDivisionId)) {
+        setUploadDivisionId(DEFAULT_DIVISION_ID);
+      }
+      await reloadStoredFiles(effectiveDivisionIds);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  function updateSelectedDivisions(divisionIds: string[]) {
+    const resolved = resolveSelectedDivisionIds(divisionIds, organization);
+    setSelectedDivisionIds(resolved);
+    writeSelectedDivisions(resolved);
+  }
+
   async function removeStoredFile(file: StoredPdfFileSummary) {
     if (!window.confirm(`Bestand "${file.name}" verwijderen?`)) {
       return;
@@ -451,21 +563,12 @@ function App() {
             <strong>{segmentLabel(selectedDaySegment)}</strong>
           </label>
           <button
-            className={page === "files" ? "icon-button active" : "icon-button"}
+            className={page === "settings" ? "icon-button active" : "icon-button"}
             type="button"
-            onClick={() => setPage((value) => (value === "files" ? "loops" : "files"))}
-            title={page === "files" ? "Omloop overzicht tonen" : "Bestanden beheren"}
+            onClick={() => setPage((value) => (value === "settings" ? "loops" : "settings"))}
+            title={page === "settings" ? "Omloop overzicht tonen" : "Instellingen"}
           >
-            {page === "files" ? <Table2 size={19} /> : <Database size={19} />}
-          </button>
-          <button
-            className="icon-button"
-            type="button"
-            onClick={exportCsv}
-            disabled={filteredMovements.length === 0}
-            title="Exporteren als CSV"
-          >
-            <Download size={19} />
+            {page === "settings" ? <Table2 size={19} /> : <Settings size={19} />}
           </button>
           <button className="icon-button danger" type="button" onClick={resetView} disabled={!query && includeNoLoop} title="Filters leegmaken">
             <X size={19} />
@@ -473,7 +576,7 @@ function App() {
         </div>
       </section>
 
-      {page !== "files" && (
+      {page !== "settings" && (
         <nav className="overview-tabs" aria-label="Overzichten">
           <button className={page === "loops" ? "active" : ""} type="button" onClick={() => setPage("loops")}>
             <span className="tab-long">Omloop overzicht</span><span className="tab-short">Omlopen</span>
@@ -485,35 +588,6 @@ function App() {
             <span className="tab-long">Dienstbegeleiding</span><span className="tab-short">Begeleiding</span>
           </button>
         </nav>
-      )}
-
-      {page === "files" && (
-        <section
-          role="button"
-          tabIndex={0}
-          className="dropzone"
-          onClick={() => inputRef.current?.click()}
-          onDragOver={(event) => event.preventDefault()}
-          onDrop={(event) => {
-            event.preventDefault();
-            void handleFiles(event.dataTransfer.files);
-          }}
-          onKeyDown={(event) => {
-            if (event.key === "Enter" || event.key === " ") {
-              event.preventDefault();
-              inputRef.current?.click();
-            }
-          }}
-        >
-          <input ref={inputRef} type="file" accept="application/pdf,.pdf" multiple onChange={(event) => void handleFiles(event.target.files)} />
-          <div className="dropzone-icon">
-            {isParsing ? <Loader2 className="spin" size={28} /> : <Upload size={28} />}
-          </div>
-          <div>
-            <strong>{isParsing ? "Pdf's worden gelezen" : "Sleep 1 of meerdere diensten-pdf's hierheen"}</strong>
-            <span>Alle verwerking gebeurt lokaal in deze app.</span>
-          </div>
-        </section>
       )}
 
       {(page === "loops" || page === "services") && (
@@ -535,7 +609,29 @@ function App() {
         </section>
       )}
 
-      {page === "guidance" ? (
+      {page === "settings" ? (
+        <SettingsPage
+          organization={organization}
+          files={storedFiles}
+          onOrganizationChange={updateOrganization}
+          buslessActions={buslessActions}
+          onBuslessActionsChange={updateBuslessActions}
+          selectedDivisionIds={selectedDivisionIds}
+          onSelectedDivisionsChange={updateSelectedDivisions}
+          onExportCsv={exportCsv}
+          canExportCsv={filteredMovements.length > 0}
+          isLoadingFiles={isLoadingFiles}
+          isParsing={isParsing}
+          uploadDivisionId={uploadDivisionId}
+          onUploadDivisionChange={setUploadDivisionId}
+          fileInputRef={inputRef}
+          onUploadFiles={handleFiles}
+          onToggleFile={toggleStoredFile}
+          onMoveFile={moveStoredFile}
+          onMoveFileDivision={moveStoredFileToDivision}
+          onDeleteFile={removeStoredFile}
+        />
+      ) : page === "guidance" ? (
         <DutyGuidance
           services={allServices}
           movements={allMovements}
@@ -552,7 +648,7 @@ function App() {
           isDemo={false}
           isToday={isToday}
         />
-      ) : page !== "files" ? (
+      ) : (
         <>
           <section className="controls">
             <label className="search-box">
@@ -615,14 +711,64 @@ function App() {
             <section className="empty-state">
               <Table2 size={32} />
               <strong>Nog geen tabel</strong>
-              <span>Kies een datum met ingedeelde pdf's of sleep bestanden naar het juiste segment.</span>
+              <span>
+                {selectedDivisionIds.length === 0
+                  ? organization.divisions.length === 0
+                    ? "Maak in Instellingen een divisie aan en deel daarna bestanden in."
+                    : "Vink in Instellingen minimaal een divisie aan om een rooster te tonen."
+                  : "Kies een datum met ingedeelde pdf's of sleep bestanden naar het juiste segment."}
+              </span>
             </section>
           )}
         </>
-      ) : (
-        <FilesPage files={storedFiles} isLoading={isLoadingFiles} onToggle={toggleStoredFile} onMove={moveStoredFile} onDelete={removeStoredFile} />
       )}
     </main>
+  );
+}
+
+function DivisionSelectionPanel({
+  organization,
+  selectedDivisionIds,
+  onChange,
+}: {
+  organization: OrganizationConfig;
+  selectedDivisionIds: string[];
+  onChange: (divisionIds: string[]) => void;
+}) {
+  function toggleDivision(divisionId: string) {
+    const next = selectedDivisionIds.includes(divisionId)
+      ? selectedDivisionIds.filter((id) => id !== divisionId)
+      : [...selectedDivisionIds, divisionId];
+    onChange(next);
+  }
+
+  return (
+    <div className="division-selection-grid">
+      {organization.divisions.length === 0 && (
+        <p className="division-selection-empty">Maak hieronder eerst divisies aan.</p>
+      )}
+      {organization.concessions.map((concession) => {
+        const divisions = organization.divisions.filter((division) => division.concessionId === concession.id);
+        if (divisions.length === 0) {
+          return null;
+        }
+        return (
+          <fieldset className="division-selection-group" key={concession.id}>
+            <legend>{concession.name}</legend>
+            {divisions.map((division) => (
+              <label key={division.id}>
+                <input
+                  type="checkbox"
+                  checked={selectedDivisionIds.includes(division.id)}
+                  onChange={() => toggleDivision(division.id)}
+                />
+                <span>{division.name}</span>
+              </label>
+            ))}
+          </fieldset>
+        );
+      })}
+    </div>
   );
 }
 
@@ -674,17 +820,512 @@ function LoadingState() {
   );
 }
 
-function FilesPage({
+function SettingsPage({
+  organization,
   files,
+  onOrganizationChange,
+  buslessActions,
+  onBuslessActionsChange,
+  selectedDivisionIds,
+  onSelectedDivisionsChange,
+  onExportCsv,
+  canExportCsv,
+  isLoadingFiles,
+  isParsing,
+  uploadDivisionId,
+  onUploadDivisionChange,
+  fileInputRef,
+  onUploadFiles,
+  onToggleFile,
+  onMoveFile,
+  onMoveFileDivision,
+  onDeleteFile,
+}: {
+  organization: OrganizationConfig;
+  files: StoredPdfFileSummary[];
+  onOrganizationChange: (organization: OrganizationConfig) => Promise<void>;
+  buslessActions: string[];
+  onBuslessActionsChange: (actions: string[]) => Promise<void>;
+  selectedDivisionIds: string[];
+  onSelectedDivisionsChange: (divisionIds: string[]) => void;
+  onExportCsv: () => void;
+  canExportCsv: boolean;
+  isLoadingFiles: boolean;
+  isParsing: boolean;
+  uploadDivisionId: string;
+  onUploadDivisionChange: (divisionId: string) => void;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  onUploadFiles: (files: FileList | null) => Promise<void>;
+  onToggleFile: (file: StoredPdfFileSummary) => Promise<void>;
+  onMoveFile: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
+  onMoveFileDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onDeleteFile: (file: StoredPdfFileSummary) => Promise<void>;
+}) {
+  const [settingsTab, setSettingsTab] = useState<"general" | "files" | "client" | "server">("client");
+  const [newAction, setNewAction] = useState("");
+  const [newConcessionName, setNewConcessionName] = useState("");
+  const [newDivisionName, setNewDivisionName] = useState("");
+  const [newDivisionConcessionId, setNewDivisionConcessionId] = useState(
+    () => organization.concessions[0]?.id ?? "",
+  );
+
+  useEffect(() => {
+    if (!organization.concessions.some((concession) => concession.id === newDivisionConcessionId)) {
+      setNewDivisionConcessionId(organization.concessions[0]?.id ?? "");
+    }
+  }, [newDivisionConcessionId, organization.concessions]);
+
+  function addAction(event: React.FormEvent) {
+    event.preventDefault();
+    const action = newAction.trim();
+    if (!action) {
+      return;
+    }
+    onBuslessActionsChange([...buslessActions, action]);
+    setNewAction("");
+  }
+
+  function addConcession(event: React.FormEvent) {
+    event.preventDefault();
+    const name = newConcessionName.trim();
+    if (!name) {
+      return;
+    }
+    const id = organizationItemId(name, organization.concessions.map((concession) => concession.id));
+    void onOrganizationChange({
+      ...organization,
+      concessions: [...organization.concessions, { id, name }],
+    });
+    setNewConcessionName("");
+  }
+
+  function addDivision(event: React.FormEvent) {
+    event.preventDefault();
+    const name = newDivisionName.trim();
+    if (!name || !newDivisionConcessionId) {
+      return;
+    }
+    const id = organizationItemId(name, organization.divisions.map((division) => division.id));
+    void onOrganizationChange({
+      ...organization,
+      divisions: [...organization.divisions, { id, name, concessionId: newDivisionConcessionId }],
+    });
+    setNewDivisionName("");
+  }
+
+  function moveDivision(division: Division, concessionId: string) {
+    void onOrganizationChange({
+      ...organization,
+      divisions: organization.divisions.map((candidate) => (
+        candidate.id === division.id ? { ...candidate, concessionId } : candidate
+      )),
+    });
+  }
+
+  function removeDivision(division: Division) {
+    if (files.some((file) => file.divisionId === division.id)) {
+      return;
+    }
+    void onOrganizationChange({
+      ...organization,
+      divisions: organization.divisions.filter((candidate) => candidate.id !== division.id),
+    });
+  }
+
+  function removeConcession(concession: Concession) {
+    if (organization.divisions.some((division) => division.concessionId === concession.id)) {
+      return;
+    }
+    void onOrganizationChange({
+      ...organization,
+      concessions: organization.concessions.filter((candidate) => candidate.id !== concession.id),
+    });
+  }
+
+  return (
+    <section className="settings-page">
+      <div className="settings-heading">
+        <div className="settings-heading-title">
+          <div>
+            <h2>Instellingen</h2>
+            <span>
+              {settingsTab === "server"
+                ? "Serverinstellingen voor alle clients"
+                : settingsTab === "client"
+                  ? "Alleen op dit apparaat"
+                  : settingsTab === "files" ? "Pdf-bestanden en dagindeling" : "Algemene opties"}
+            </span>
+          </div>
+        </div>
+        <nav className="settings-tabs" aria-label="Instellingencategorieen" role="tablist">
+          <button
+            className={settingsTab === "general" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === "general"}
+            onClick={() => setSettingsTab("general")}
+          >
+            Algemeen
+          </button>
+          <button
+            className={settingsTab === "files" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === "files"}
+            onClick={() => setSettingsTab("files")}
+          >
+            Bestanden
+          </button>
+          <button
+            className={settingsTab === "client" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === "client"}
+            onClick={() => setSettingsTab("client")}
+          >
+            Clientinstellingen
+          </button>
+          <button
+            className={settingsTab === "server" ? "active" : ""}
+            type="button"
+            role="tab"
+            aria-selected={settingsTab === "server"}
+            onClick={() => setSettingsTab("server")}
+          >
+            Serverinstellingen
+          </button>
+        </nav>
+      </div>
+
+      <div className={settingsTab === "files" ? "settings-content settings-content-wide" : "settings-content"}>
+        {settingsTab === "general" && (
+          <section className="settings-group">
+            <div className="settings-group-heading">
+              <div>
+                <h3>Export</h3>
+                <span>Download de huidige selectie als CSV-bestand.</span>
+              </div>
+              <button className="secondary-button" type="button" onClick={onExportCsv} disabled={!canExportCsv}>
+                <Download size={17} />
+                CSV downloaden
+              </button>
+            </div>
+          </section>
+        )}
+
+        {settingsTab === "files" && (
+          <FileManagementTab
+            files={files}
+            organization={organization}
+            isLoading={isLoadingFiles}
+            isParsing={isParsing}
+            uploadDivisionId={uploadDivisionId}
+            onUploadDivisionChange={onUploadDivisionChange}
+            fileInputRef={fileInputRef}
+            onUploadFiles={onUploadFiles}
+            onToggle={onToggleFile}
+            onMove={onMoveFile}
+            onMoveDivision={onMoveFileDivision}
+            onDelete={onDeleteFile}
+          />
+        )}
+
+        {settingsTab === "client" && (
+          <section className="settings-group">
+            <div className="settings-group-heading">
+              <div>
+                <h3>Getoonde divisies</h3>
+                <span>Kies welke divisies in de overzichten en dienstbegeleiding worden geladen.</span>
+              </div>
+            </div>
+            <DivisionSelectionPanel
+              organization={organization}
+              selectedDivisionIds={selectedDivisionIds}
+              onChange={onSelectedDivisionsChange}
+            />
+          </section>
+        )}
+
+        {settingsTab === "server" && (
+          <>
+        <section className="settings-group">
+          <div className="settings-group-heading">
+            <div>
+              <h3>Divisies en concessies</h3>
+              <span>Bestanden horen bij een divisie; concessies groeperen alleen de divisies.</span>
+            </div>
+          </div>
+
+          <div className="organization-tree">
+            {organization.concessions.map((concession) => {
+              const divisions = organization.divisions.filter((division) => division.concessionId === concession.id);
+              return (
+                <section className="concession-group" key={concession.id}>
+                  <header>
+                    <strong>{concession.name}</strong>
+                    <span>{divisions.length} divisies</span>
+                    <button
+                      className="icon-button danger"
+                      type="button"
+                      disabled={divisions.length > 0}
+                      onClick={() => removeConcession(concession)}
+                      title={divisions.length > 0 ? "Verplaats of verwijder eerst de divisies" : `${concession.name} verwijderen`}
+                    >
+                      <Trash2 size={16} />
+                    </button>
+                  </header>
+                  <ul>
+                    {divisions.length === 0 ? (
+                      <li className="organization-empty">Nog geen divisies</li>
+                    ) : divisions.map((division) => {
+                      const fileCount = files.filter((file) => file.divisionId === division.id).length;
+                      return (
+                        <li key={division.id}>
+                          <div>
+                            <strong>{division.name}</strong>
+                            <span>{fileCount} bestanden</span>
+                          </div>
+                          <label>
+                            <span>Concessie</span>
+                            <select
+                              value={division.concessionId}
+                              onChange={(event) => moveDivision(division, event.target.value)}
+                            >
+                              {organization.concessions.map((candidate) => (
+                                <option value={candidate.id} key={candidate.id}>{candidate.name}</option>
+                              ))}
+                            </select>
+                          </label>
+                          <button
+                            className="icon-button danger"
+                            type="button"
+                            disabled={fileCount > 0}
+                            onClick={() => removeDivision(division)}
+                            title={fileCount > 0 ? "Verplaats eerst de gekoppelde bestanden" : `${division.name} verwijderen`}
+                          >
+                            <Trash2 size={16} />
+                          </button>
+                        </li>
+                      );
+                    })}
+                  </ul>
+                </section>
+              );
+            })}
+          </div>
+
+          <div className="organization-add-grid">
+            <form className="settings-add-action" onSubmit={addConcession}>
+              <label htmlFor="new-concession">Nieuwe concessie</label>
+              <div>
+                <input
+                  id="new-concession"
+                  value={newConcessionName}
+                  onChange={(event) => setNewConcessionName(event.target.value)}
+                  placeholder="Bijvoorbeeld Zuid-Holland Noord"
+                />
+                <button className="secondary-button" type="submit" disabled={!newConcessionName.trim()}>
+                  <Plus size={17} />
+                  Toevoegen
+                </button>
+              </div>
+            </form>
+            <form className="settings-add-action" onSubmit={addDivision}>
+              <label htmlFor="new-division">Nieuwe divisie</label>
+              <div>
+                <input
+                  id="new-division"
+                  value={newDivisionName}
+                  onChange={(event) => setNewDivisionName(event.target.value)}
+                  placeholder="Bijvoorbeeld GD"
+                />
+                <select
+                  aria-label="Concessie voor nieuwe divisie"
+                  value={newDivisionConcessionId}
+                  onChange={(event) => setNewDivisionConcessionId(event.target.value)}
+                >
+                  {organization.concessions.map((concession) => (
+                    <option value={concession.id} key={concession.id}>{concession.name}</option>
+                  ))}
+                </select>
+                <button
+                  className="secondary-button"
+                  type="submit"
+                  disabled={!newDivisionName.trim() || !newDivisionConcessionId}
+                >
+                  <Plus size={17} />
+                  Toevoegen
+                </button>
+              </div>
+            </form>
+          </div>
+        </section>
+
+        <section className="settings-group">
+          <div className="settings-group-heading">
+            <div>
+              <h3>Busloze acties</h3>
+              <span>{buslessActions.length} acties</span>
+            </div>
+            <button
+              className="secondary-button"
+              type="button"
+              onClick={() => onBuslessActionsChange([...DEFAULT_BUSLESS_ACTIONS])}
+            >
+              <RotateCcw size={16} />
+              Standaard
+            </button>
+          </div>
+
+          <ul className="settings-action-list">
+            {buslessActions.map((action) => (
+              <li key={action.toLocaleLowerCase("nl")}>
+                <span>{action}</span>
+                <button
+                  className="icon-button danger"
+                  type="button"
+                  onClick={() => onBuslessActionsChange(buslessActions.filter((candidate) => candidate !== action))}
+                  title={`${action} verwijderen`}
+                >
+                  <Trash2 size={17} />
+                </button>
+              </li>
+            ))}
+          </ul>
+
+          <form className="settings-add-action" onSubmit={addAction}>
+            <label htmlFor="new-busless-action">Nieuwe actie</label>
+            <div>
+              <input
+                id="new-busless-action"
+                value={newAction}
+                onChange={(event) => setNewAction(event.target.value)}
+                placeholder="Naam op het dienstblad"
+              />
+              <button className="secondary-button" type="submit" disabled={!newAction.trim()}>
+                <Plus size={17} />
+                Toevoegen
+              </button>
+            </div>
+          </form>
+        </section>
+          </>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function FileManagementTab({
+  files,
+  organization,
   isLoading,
+  isParsing,
+  uploadDivisionId,
+  onUploadDivisionChange,
+  fileInputRef,
+  onUploadFiles,
   onToggle,
   onMove,
+  onMoveDivision,
   onDelete,
 }: {
   files: StoredPdfFileSummary[];
+  organization: OrganizationConfig;
+  isLoading: boolean;
+  isParsing: boolean;
+  uploadDivisionId: string;
+  onUploadDivisionChange: (divisionId: string) => void;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  onUploadFiles: (files: FileList | null) => Promise<void>;
+  onToggle: (file: StoredPdfFileSummary) => Promise<void>;
+  onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
+  onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onDelete: (file: StoredPdfFileSummary) => Promise<void>;
+}) {
+  return (
+    <div className="settings-files-tab">
+      <label className="upload-division">
+        <span>Nieuwe bestanden horen bij</span>
+        <select value={uploadDivisionId} onChange={(event) => onUploadDivisionChange(event.target.value)}>
+          <option value="">Nog niet ingedeeld</option>
+          {organization.concessions.map((concession) => (
+            <optgroup label={concession.name} key={concession.id}>
+              {organization.divisions
+                .filter((division) => division.concessionId === concession.id)
+                .map((division) => <option value={division.id} key={division.id}>{division.name}</option>)}
+            </optgroup>
+          ))}
+        </select>
+      </label>
+      <section
+        role="button"
+        tabIndex={0}
+        aria-disabled={isParsing}
+        className="dropzone"
+        onClick={() => {
+          if (!isParsing) {
+            fileInputRef.current?.click();
+          }
+        }}
+        onDragOver={(event) => event.preventDefault()}
+        onDrop={(event) => {
+          event.preventDefault();
+          if (!isParsing) {
+            void onUploadFiles(event.dataTransfer.files);
+          }
+        }}
+        onKeyDown={(event) => {
+          if (!isParsing && (event.key === "Enter" || event.key === " ")) {
+            event.preventDefault();
+            fileInputRef.current?.click();
+          }
+        }}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept="application/pdf,.pdf"
+          multiple
+          onChange={(event) => void onUploadFiles(event.target.files)}
+        />
+        <div className="dropzone-icon">
+          {isParsing ? <Loader2 className="spin" size={28} /> : <Upload size={28} />}
+        </div>
+        <div>
+          <strong>{isParsing ? "Pdf's worden gelezen" : "Sleep 1 of meerdere diensten-pdf's hierheen"}</strong>
+          <span>Alle verwerking gebeurt lokaal in deze app.</span>
+        </div>
+      </section>
+
+      <FilesPage
+        files={files}
+        organization={organization}
+        isLoading={isLoading}
+        onToggle={onToggle}
+        onMove={onMove}
+        onMoveDivision={onMoveDivision}
+        onDelete={onDelete}
+      />
+    </div>
+  );
+}
+
+function FilesPage({
+  files,
+  organization,
+  isLoading,
+  onToggle,
+  onMove,
+  onMoveDivision,
+  onDelete,
+}: {
+  files: StoredPdfFileSummary[];
+  organization: OrganizationConfig;
   isLoading: boolean;
   onToggle: (file: StoredPdfFileSummary) => Promise<void>;
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
+  onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
   if (isLoading) {
@@ -761,6 +1402,24 @@ function FilesPage({
                           {formatFileSize(file.size)} - {file.serviceCount} diensten - {file.movementCount} regels
                         </span>
                         <small>Toegevoegd {formatDateTime(file.uploadedAt)}</small>
+                        <label className="file-division">
+                          <span>Divisie</span>
+                          <select
+                            value={file.divisionId}
+                            onChange={(event) => void onMoveDivision(file, event.target.value)}
+                          >
+                            <option value="">Nog niet ingedeeld</option>
+                            {organization.concessions.map((concession) => (
+                              <optgroup label={concession.name} key={concession.id}>
+                                {organization.divisions
+                                  .filter((division) => division.concessionId === concession.id)
+                                  .map((division) => (
+                                    <option value={division.id} key={division.id}>{division.name}</option>
+                                  ))}
+                              </optgroup>
+                            ))}
+                          </select>
+                        </label>
                         <div className="segment-actions" aria-label="Bestand verplaatsen">
                           {DAY_SEGMENTS.map((targetSegment) => (
                             <button
@@ -812,7 +1471,7 @@ function ServicesOverview({ services, movements }: { services: Dienst[]; movemen
           const serviceMovements = movements
             .filter((movement) => movement.dienstnummer === dienst.serviceNumber)
             .sort((a, b) => (parseTime(a.vertrek) ?? 0) - (parseTime(b.vertrek) ?? 0));
-          const vehicleMovements = serviceMovements.filter(isVehicleTimelineMovement);
+          const vehicleMovements = serviceMovements.filter((movement) => isVehicleTimelineMovement(movement));
           const loops = [...new Set(vehicleMovements.map((movement) => displayLoopNumber(loopKey(movement))))];
 
           return (
@@ -984,10 +1643,10 @@ function DutyGuidance({
   const serviceMovements = selectedService
     ? movements.filter((movement) => movement.dienstnummer === selectedService.serviceNumber)
     : [];
-  const entries = buildGuidanceEntries(serviceMovements, selectedService?.start);
+  const entries = buildGuidanceEntries(serviceMovements);
   const statusByMovementId = new Map(liveStatuses.map((status) => [status.movementId, status]));
   const loopSnapshots = buildLoopLiveSnapshots(movements, statusByMovementId, currentTime);
-  const currentMinute = alignMinuteToEntries(currentTime, entries);
+  const currentMinute = alignMinuteToEntries(currentTime);
   const currentIndex = entries.findIndex((entry) => entry.timing.start <= currentMinute && entry.timing.end > currentMinute);
   const nextIndex = currentIndex >= 0
     ? currentIndex + 1
@@ -1947,6 +2606,22 @@ function segmentLabel(segment: DaySegment): string {
   return DAY_SEGMENTS.find((item) => item.id === segment)?.label ?? segment;
 }
 
+function resolveSelectedDivisionIds(
+  requestedDivisionIds: string[],
+  organization: OrganizationConfig,
+): string[] {
+  const available = new Set(organization.divisions.map((division) => division.id));
+  const selected = [...new Set(requestedDivisionIds)].filter((divisionId) => available.has(divisionId));
+  return selected.sort();
+}
+
+function sameStringSet(first: string[], second: string[]): boolean {
+  const orderedFirst = [...first].sort();
+  const orderedSecond = [...second].sort();
+  return orderedFirst.length === orderedSecond.length
+    && orderedFirst.every((value, index) => value === orderedSecond[index]);
+}
+
 type TimelineTiming = {
   start: number;
   end: number;
@@ -2060,9 +2735,7 @@ function getMovementTiming(movement: Movement): TimelineTiming | undefined {
   };
 }
 
-function buildGuidanceEntries(movements: Movement[], dutyStart: string | undefined): GuidanceEntry[] {
-  const referenceStart = dutyStart ? parseTime(dutyStart) : undefined;
-
+function buildGuidanceEntries(movements: Movement[]): GuidanceEntry[] {
   return movements
     .map((movement) => {
       let start = parseTime(movement.vertrek);
@@ -2070,12 +2743,8 @@ function buildGuidanceEntries(movements: Movement[], dutyStart: string | undefin
       if (start === undefined || end === undefined) {
         return undefined;
       }
-      if (referenceStart !== undefined && start < referenceStart - 12 * 60) {
-        start += 24 * 60;
-      }
-      if (start >= 24 * 60 && end < 24 * 60) {
-        end += 24 * 60;
-      }
+      start = toOperationalMinute(start);
+      end = toOperationalMinute(end);
       if (end < start) {
         end += 24 * 60;
       }
@@ -2163,7 +2832,7 @@ function findTakeoverArrival(
 
   const candidates = movements
     .filter((movement) => compactLoopNumber(movement.omloopnummer) === targetLoop)
-    .filter(isVehicleTimelineMovement)
+    .filter((movement) => isVehicleTimelineMovement(movement))
     .map((movement) => ({ movement, timing: alignTimingToTarget(getMovementTiming(movement), target.timing.start) }))
     .filter((candidate): candidate is { movement: Movement; timing: TimelineTiming } => candidate.timing !== undefined)
     .filter((candidate) => candidate.timing.end <= target.timing.start && target.timing.start - candidate.timing.end <= 180)
@@ -2219,12 +2888,9 @@ function sameGuidanceStop(first: string, second: string): boolean {
   );
 }
 
-function alignMinuteToEntries(currentTime: Date, entries: GuidanceEntry[]): number {
+function alignMinuteToEntries(currentTime: Date): number {
   const minute = currentTime.getHours() * 60 + currentTime.getMinutes() + currentTime.getSeconds() / 60;
-  if (entries.length === 0) {
-    return minute;
-  }
-  return alignCurrentMinute(minute, { start: entries[0].timing.start, end: entries.at(-1)!.timing.end });
+  return toOperationalMinute(minute);
 }
 
 function buildLoopLiveSnapshots(
@@ -2339,16 +3005,6 @@ function guidanceActionSubtitle(movement: Movement): string {
   }
 
   return guidanceActionDetail(movement);
-}
-
-function formatDelay(seconds: number): string {
-  if (seconds > 60) {
-    return `+${Math.round(seconds / 60)} min vertraagd`;
-  }
-  if (seconds < -60) {
-    return `${Math.round(seconds / 60)} min te vroeg`;
-  }
-  return "Op tijd";
 }
 
 function formatHandoverDifference(seconds: number): string {
@@ -2513,6 +3169,18 @@ function labelForType(type: Movement["type"]): string {
 function formatServiceMovementLabel(movement: Movement): string {
   const label = `${movement.van} ${movement.naar} ${movement.raw}`.toLowerCase();
 
+  if (/\breis\b/.test(label) || /\brij\s+mee\b/.test(label)) {
+    return "Reis";
+  }
+
+  if (/\bprep[\s-]*in\b/.test(label)) {
+    return "Prep-in";
+  }
+
+  if (/\brijklaar\s*maken\b/.test(label)) {
+    return "Rijklaarmaken";
+  }
+
   if (label.includes("explo")) {
     return "Explo";
   }
@@ -2541,20 +3209,24 @@ function formatServiceRoute(movement: Movement): string {
   return movement.raw || "-";
 }
 
-function isVehicleTimelineMovement(movement: Movement): boolean {
+function isVehicleTimelineMovement(movement: Movement, buslessActions?: string[]): boolean {
   if (!movement.omloopnummer) {
     return false;
   }
 
-  if (isDriverOnlyMovement(movement)) {
+  if (isDriverOnlyMovement(movement, buslessActions)) {
     return false;
   }
 
   return movement.type === "rit" || movement.type === "materiaal";
 }
 
-function isDriverOnlyMovement(movement: Movement): boolean {
+function isDriverOnlyMovement(movement: Movement, buslessActions?: string[]): boolean {
   const label = `${movement.van} ${movement.naar} ${movement.raw}`.toLowerCase();
+
+  if (isBuslessDriverRow(label, buslessActions)) {
+    return true;
+  }
 
   return [
     "explo",
@@ -2575,6 +3247,15 @@ function formatLineLabel(lijnnummer: string | undefined, type: Movement["type"])
   }
 
   return /^\d+$/.test(lijnnummer) ? `L${lijnnummer}` : lijnnummer;
+}
+
+function normaliseStoredMovement(movement: Movement): Movement {
+  const lijnnummer = withoutLegacyOvChipNumber(
+    movement.lijnnummer,
+    movement.ritnummer,
+    movement.raw,
+  );
+  return lijnnummer === movement.lijnnummer ? movement : { ...movement, lijnnummer };
 }
 
 function colorFor(value: string): string {

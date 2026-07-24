@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     env,
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -12,7 +12,7 @@ use axum::{
     http::{header, HeaderMap, HeaderValue, Request, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
     Json, Router,
 };
 use chrono::{Datelike, Local, NaiveDate, Timelike};
@@ -29,8 +29,9 @@ use tower_http::{
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-const STORAGE_SCHEMA_VERSION: u8 = 2;
+const STORAGE_SCHEMA_VERSION: u8 = 3;
 const DAY_SEGMENTS: [&str; 4] = ["weekday", "saturday", "sunday", "unassigned"];
+const LEGACY_DEFAULT_ID: &str = "standaard";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -42,6 +43,12 @@ struct LiveApiRequest {
 #[derive(Deserialize)]
 struct LiveApiQuery {
     date: String,
+    divisions: Option<String>,
+}
+
+#[derive(Default, Deserialize)]
+struct ScheduleQuery {
+    divisions: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -60,6 +67,38 @@ struct AppState {
     live: LiveRuntime,
     files_directory: PathBuf,
     records: Arc<RwLock<Vec<StoredFileRecord>>>,
+    organization_path: PathBuf,
+    organization: Arc<RwLock<OrganizationConfig>>,
+    settings_path: PathBuf,
+    settings: Arc<RwLock<AdminSettings>>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Concession {
+    id: String,
+    name: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct Division {
+    id: String,
+    name: String,
+    concession_id: String,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrganizationConfig {
+    concessions: Vec<Concession>,
+    divisions: Vec<Division>,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminSettings {
+    busless_actions: Vec<String>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -72,6 +111,8 @@ struct StoredFileRecord {
     uploaded_at: i64,
     enabled: bool,
     day_segment: String,
+    #[serde(default = "default_division_id")]
+    division_id: String,
     #[serde(default)]
     content_hash: Option<String>,
     parse_result: Value,
@@ -87,6 +128,7 @@ struct StoredFileSummary {
     uploaded_at: i64,
     enabled: bool,
     day_segment: String,
+    division_id: String,
     content_hash: Option<String>,
     service_count: usize,
     movement_count: usize,
@@ -98,6 +140,8 @@ struct CatalogResponse {
     schema_version: u8,
     revision: String,
     segment_revisions: BTreeMap<String, String>,
+    organization: OrganizationConfig,
+    admin_settings: AdminSettings,
     files: Vec<StoredFileSummary>,
 }
 
@@ -105,7 +149,10 @@ struct CatalogResponse {
 #[serde(rename_all = "camelCase")]
 struct ScheduleResponse {
     schema_version: u8,
+    key: String,
     segment: String,
+    division_ids: Vec<String>,
+    catalog_revision: String,
     revision: String,
     results: Vec<Value>,
 }
@@ -115,6 +162,7 @@ struct ScheduleResponse {
 struct StoredFilePatch {
     enabled: Option<bool>,
     day_segment: Option<String>,
+    division_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +194,8 @@ struct StoredMovement {
     naar: String,
     #[serde(rename = "type")]
     movement_type: String,
+    #[serde(default)]
+    raw: String,
 }
 
 #[tokio::main]
@@ -164,12 +214,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let web_directory = env_path("DIENSTENLEZER_WEB_DIR", "dist");
     let runtime = LiveRuntime::new(data_directory.join("qbuzz-live"))?;
     let files_directory = data_directory.join("pdf-files");
+    let organization_path = data_directory.join("organization.json");
+    let settings_path = data_directory.join("settings.json");
     tokio::fs::create_dir_all(&files_directory).await?;
-    let records = read_records(&files_directory).await?;
+    let mut records = read_records(&files_directory).await?;
+    let mut organization = read_organization(&organization_path).await?;
+    let settings = read_admin_settings(&settings_path).await?;
+    migrate_legacy_default(
+        &files_directory,
+        &organization_path,
+        &mut records,
+        &mut organization,
+    )
+    .await?;
     let state = AppState {
         live: runtime,
         files_directory,
         records: Arc::new(RwLock::new(records)),
+        organization_path,
+        organization: Arc::new(RwLock::new(organization)),
+        settings_path,
+        settings: Arc::new(RwLock::new(settings)),
     };
     let index_file = web_directory.join("index.html");
     if !index_file.is_file() {
@@ -185,6 +250,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .route("/api/catalog", get(catalog))
         .route("/api/schedules/{segment}", get(schedule))
+        .route("/api/organization", put(update_organization))
+        .route("/api/settings", put(update_admin_settings))
         .route("/api/files", post(upload_file))
         .route("/api/files/check", post(check_files))
         .route(
@@ -224,6 +291,8 @@ async fn catalog(
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     let records = state.records.read().await;
+    let organization = state.organization.read().await.clone();
+    let admin_settings = state.settings.read().await.clone();
     let files = records.iter().map(file_summary).collect::<Vec<_>>();
     let mut segment_revisions = BTreeMap::new();
     for segment in DAY_SEGMENTS {
@@ -231,8 +300,10 @@ async fn catalog(
     }
     let response = CatalogResponse {
         schema_version: STORAGE_SCHEMA_VERSION,
-        revision: hash_json(&files)?,
+        revision: hash_json(&(files.as_slice(), &organization))?,
         segment_revisions,
+        organization,
+        admin_settings,
         files,
     };
     etagged_json(&headers, &response)
@@ -241,17 +312,32 @@ async fn catalog(
 async fn schedule(
     State(state): State<AppState>,
     AxumPath(segment): AxumPath<String>,
+    Query(query): Query<ScheduleQuery>,
     headers: HeaderMap,
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     validate_segment(&segment)?;
     let records = state.records.read().await;
+    let organization = state.organization.read().await;
+    let division_ids = selected_division_ids(query.divisions.as_deref(), &organization)?;
+    let catalog_revision = hash_json(&(
+        records.iter().map(file_summary).collect::<Vec<_>>(),
+        &*organization,
+    ))?;
+    let key = schedule_key(&segment, &division_ids);
     let response = ScheduleResponse {
         schema_version: STORAGE_SCHEMA_VERSION,
+        key,
         segment: segment.clone(),
-        revision: segment_revision(&records, &segment),
+        division_ids: division_ids.iter().cloned().collect(),
+        catalog_revision,
+        revision: schedule_revision(&records, &segment, &division_ids),
         results: records
             .iter()
-            .filter(|record| record.enabled && record.day_segment == segment)
+            .filter(|record| {
+                record.enabled
+                    && record.day_segment == segment
+                    && division_ids.contains(&record.division_id)
+            })
             .map(|record| record.parse_result.clone())
             .collect(),
     };
@@ -265,7 +351,10 @@ async fn qbuzz_live_from_schedule(
 ) -> Result<Response, (StatusCode, Json<ApiError>)> {
     let segment = segment_for_date(&query.date)?;
     let records = state.records.read().await;
-    let movements = live_requests_for_records(&records, segment);
+    let organization = state.organization.read().await;
+    let division_ids = selected_division_ids(query.divisions.as_deref(), &organization)?;
+    let movements = live_requests_for_records(&records, segment, &division_ids);
+    drop(organization);
     drop(records);
     let response = get_live_statuses(&state.live, query.date, movements)
         .await
@@ -321,6 +410,7 @@ async fn upload_file(
     let mut record =
         record.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Bestandsmetadata ontbreekt."))?;
     validate_segment(&record.day_segment)?;
+    validate_division_exists(&record.division_id, &*state.organization.read().await)?;
     let pdf = pdf.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Pdf-bestand ontbreekt."))?;
 
     let content_hash = hex_sha256(&pdf);
@@ -358,6 +448,9 @@ async fn update_file(
     if let Some(segment) = patch.day_segment.as_deref() {
         validate_segment(segment)?;
     }
+    if let Some(division_id) = patch.division_id.as_deref() {
+        validate_division_exists(division_id, &*state.organization.read().await)?;
+    }
     let mut records = state.records.write().await;
     let record = records
         .iter_mut()
@@ -369,11 +462,49 @@ async fn update_file(
     if let Some(day_segment) = patch.day_segment {
         record.day_segment = day_segment;
     }
+    if let Some(division_id) = patch.division_id {
+        record.division_id = division_id;
+    }
     let path = state
         .files_directory
         .join(format!("{}.json", file_key(&id)));
     write_json(&path, record).await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+async fn update_organization(
+    State(state): State<AppState>,
+    Json(organization): Json<OrganizationConfig>,
+) -> Result<Json<OrganizationConfig>, (StatusCode, Json<ApiError>)> {
+    validate_organization(&organization)?;
+    let records = state.records.read().await;
+    let division_ids = organization
+        .divisions
+        .iter()
+        .map(|division| division.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if records.iter().any(|record| {
+        !record.division_id.is_empty() && !division_ids.contains(record.division_id.as_str())
+    }) {
+        return Err(api_error(
+            StatusCode::CONFLICT,
+            "Een divisie met gekoppelde bestanden kan niet worden verwijderd.",
+        ));
+    }
+    drop(records);
+    write_json(&state.organization_path, &organization).await?;
+    *state.organization.write().await = organization.clone();
+    Ok(Json(organization))
+}
+
+async fn update_admin_settings(
+    State(state): State<AppState>,
+    Json(settings): Json<AdminSettings>,
+) -> Result<Json<AdminSettings>, (StatusCode, Json<ApiError>)> {
+    let settings = normalize_admin_settings(settings)?;
+    write_json(&state.settings_path, &settings).await?;
+    *state.settings.write().await = settings.clone();
+    Ok(Json(settings))
 }
 
 async fn delete_file(
@@ -403,6 +534,105 @@ async fn read_records(
     Ok(records)
 }
 
+async fn read_organization(path: &Path) -> Result<OrganizationConfig, Box<dyn std::error::Error>> {
+    if !tokio::fs::try_exists(path).await? {
+        return Ok(default_organization());
+    }
+    let organization = serde_json::from_slice::<OrganizationConfig>(&tokio::fs::read(path).await?)?;
+    validate_organization(&organization).map_err(|(_, Json(error))| error.error)?;
+    Ok(organization)
+}
+
+async fn read_admin_settings(path: &Path) -> Result<AdminSettings, Box<dyn std::error::Error>> {
+    if !tokio::fs::try_exists(path).await? {
+        return Ok(default_admin_settings());
+    }
+    let settings = serde_json::from_slice::<AdminSettings>(&tokio::fs::read(path).await?)?;
+    normalize_admin_settings(settings).map_err(|(_, Json(error))| error.error.into())
+}
+
+fn default_division_id() -> String {
+    String::new()
+}
+
+fn default_organization() -> OrganizationConfig {
+    OrganizationConfig {
+        concessions: Vec::new(),
+        divisions: Vec::new(),
+    }
+}
+
+fn default_admin_settings() -> AdminSettings {
+    AdminSettings {
+        busless_actions: vec![
+            "REIS".to_owned(),
+            "Rij mee".to_owned(),
+            "Prep-in".to_owned(),
+            "Rijklaarmaken".to_owned(),
+        ],
+    }
+}
+
+fn normalize_admin_settings(
+    settings: AdminSettings,
+) -> Result<AdminSettings, (StatusCode, Json<ApiError>)> {
+    if settings.busless_actions.len() > 100 {
+        return Err(bad_request(
+            "Er kunnen maximaal 100 busloze acties worden opgeslagen.",
+        ));
+    }
+
+    let mut seen = BTreeSet::new();
+    let mut busless_actions = Vec::new();
+    for raw_action in settings.busless_actions {
+        let action = raw_action.split_whitespace().collect::<Vec<_>>().join(" ");
+        if action.is_empty() {
+            continue;
+        }
+        if action.chars().count() > 80 {
+            return Err(bad_request(
+                "Een busloze actie mag maximaal 80 tekens bevatten.",
+            ));
+        }
+        if seen.insert(action.to_lowercase()) {
+            busless_actions.push(action);
+        }
+    }
+
+    Ok(AdminSettings { busless_actions })
+}
+
+async fn migrate_legacy_default(
+    files_directory: &Path,
+    organization_path: &Path,
+    records: &mut [StoredFileRecord],
+    organization: &mut OrganizationConfig,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let legacy_organization = organization.concessions.len() == 1
+        && organization.divisions.len() == 1
+        && organization.concessions[0].id == LEGACY_DEFAULT_ID
+        && organization.divisions[0].id == LEGACY_DEFAULT_ID;
+    if !legacy_organization {
+        return Ok(());
+    }
+
+    *organization = default_organization();
+    write_json(organization_path, organization)
+        .await
+        .map_err(|(_, Json(error))| error.error)?;
+    for record in records
+        .iter_mut()
+        .filter(|record| record.division_id == LEGACY_DEFAULT_ID)
+    {
+        record.division_id.clear();
+        let path = files_directory.join(format!("{}.json", file_key(&record.id)));
+        write_json(&path, record)
+            .await
+            .map_err(|(_, Json(error))| error.error)?;
+    }
+    Ok(())
+}
+
 fn sort_records(records: &mut [StoredFileRecord]) {
     records.sort_by(|first, second| {
         second
@@ -421,6 +651,7 @@ fn file_summary(record: &StoredFileRecord) -> StoredFileSummary {
         uploaded_at: record.uploaded_at,
         enabled: record.enabled,
         day_segment: record.day_segment.clone(),
+        division_id: record.division_id.clone(),
         content_hash: record.content_hash.clone(),
         service_count: value_array_len(&record.parse_result, "diensten"),
         movement_count: value_array_len(&record.parse_result, "movements"),
@@ -432,12 +663,29 @@ fn value_array_len(value: &Value, key: &str) -> usize {
 }
 
 fn segment_revision(records: &[StoredFileRecord], segment: &str) -> String {
-    let mut hasher = Sha256::new();
-    hasher.update(segment.as_bytes());
-    for record in records
+    let division_ids = records
         .iter()
         .filter(|record| record.enabled && record.day_segment == segment)
-    {
+        .map(|record| record.division_id.clone())
+        .collect::<BTreeSet<_>>();
+    schedule_revision(records, segment, &division_ids)
+}
+
+fn schedule_revision(
+    records: &[StoredFileRecord],
+    segment: &str,
+    division_ids: &BTreeSet<String>,
+) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(segment.as_bytes());
+    for division_id in division_ids {
+        hasher.update(division_id.as_bytes());
+    }
+    for record in records.iter().filter(|record| {
+        record.enabled
+            && record.day_segment == segment
+            && division_ids.contains(&record.division_id)
+    }) {
         hasher.update(record.id.as_bytes());
         hasher.update(record.last_modified.to_le_bytes());
         if let Ok(bytes) = serde_json::to_vec(&record.parse_result) {
@@ -527,6 +775,100 @@ fn validate_segment(segment: &str) -> Result<(), (StatusCode, Json<ApiError>)> {
     }
 }
 
+fn validate_division_exists(
+    division_id: &str,
+    organization: &OrganizationConfig,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if division_id.is_empty()
+        || organization
+            .divisions
+            .iter()
+            .any(|division| division.id == division_id)
+    {
+        Ok(())
+    } else {
+        Err(api_error(StatusCode::BAD_REQUEST, "Onbekende divisie."))
+    }
+}
+
+fn validate_organization(
+    organization: &OrganizationConfig,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    let concession_ids = organization
+        .concessions
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if concession_ids.len() != organization.concessions.len()
+        || organization.concessions.iter().any(|item| {
+            !valid_organization_value(&item.id) || !valid_organization_value(&item.name)
+        })
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Concessienamen en -codes moeten uniek en geldig zijn.",
+        ));
+    }
+    let division_ids = organization
+        .divisions
+        .iter()
+        .map(|item| item.id.as_str())
+        .collect::<BTreeSet<_>>();
+    if division_ids.len() != organization.divisions.len()
+        || organization.divisions.iter().any(|item| {
+            !valid_organization_value(&item.id)
+                || !valid_organization_value(&item.name)
+                || !concession_ids.contains(item.concession_id.as_str())
+        })
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Divisienamen en -codes moeten uniek, geldig en aan een concessie gekoppeld zijn.",
+        ));
+    }
+    Ok(())
+}
+
+fn valid_organization_value(value: &str) -> bool {
+    let trimmed = value.trim();
+    !trimmed.is_empty() && trimmed.len() <= 80 && !trimmed.chars().any(char::is_control)
+}
+
+fn selected_division_ids(
+    raw: Option<&str>,
+    organization: &OrganizationConfig,
+) -> Result<BTreeSet<String>, (StatusCode, Json<ApiError>)> {
+    let available = organization
+        .divisions
+        .iter()
+        .map(|division| division.id.clone())
+        .collect::<BTreeSet<_>>();
+    let selected = raw
+        .map(|value| {
+            value
+                .split(',')
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned)
+                .collect::<BTreeSet<_>>()
+        })
+        .unwrap_or_else(|| available.clone());
+    if !selected.is_subset(&available) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "De divisieselectie bevat een onbekende divisie.",
+        ));
+    }
+    Ok(selected)
+}
+
+fn schedule_key(segment: &str, division_ids: &BTreeSet<String>) -> String {
+    format!(
+        "{segment}:{}",
+        division_ids.iter().cloned().collect::<Vec<_>>().join(",")
+    )
+}
+
 fn segment_for_date(date: &str) -> Result<&'static str, (StatusCode, Json<ApiError>)> {
     let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").map_err(bad_request)?;
     Ok(match date.weekday().number_from_monday() {
@@ -539,12 +881,17 @@ fn segment_for_date(date: &str) -> Result<&'static str, (StatusCode, Json<ApiErr
 fn live_requests_for_records(
     records: &[StoredFileRecord],
     segment: &str,
+    division_ids: &BTreeSet<String>,
 ) -> Vec<LiveMovementRequest> {
     let now = Local::now();
     let current_minute = now.hour() as i32 * 60 + now.minute() as i32;
     records
         .iter()
-        .filter(|record| record.enabled && record.day_segment == segment)
+        .filter(|record| {
+            record.enabled
+                && record.day_segment == segment
+                && division_ids.contains(&record.division_id)
+        })
         .filter_map(|record| {
             serde_json::from_value::<StoredParseResult>(record.parse_result.clone()).ok()
         })
@@ -559,7 +906,11 @@ fn live_requests_for_records(
         .filter(|movement| movement_in_live_window(movement, current_minute))
         .map(|movement| LiveMovementRequest {
             movement_id: movement.id,
-            line_number: movement.lijnnummer,
+            line_number: without_legacy_ov_chip_number(
+                movement.lijnnummer.as_deref(),
+                movement.ritnummer.as_deref(),
+                &movement.raw,
+            ),
             trip_number: movement.ritnummer,
             departure: movement.vertrek,
             arrival: movement.aankomst,
@@ -568,6 +919,31 @@ fn live_requests_for_records(
             r#type: movement.movement_type,
         })
         .collect()
+}
+
+fn without_legacy_ov_chip_number(
+    line_number: Option<&str>,
+    trip_number: Option<&str>,
+    raw: &str,
+) -> Option<String> {
+    let line_number = line_number?;
+    let Some(trip_number) = trip_number else {
+        return Some(line_number.to_owned());
+    };
+    let line_parts = line_number.split_whitespace().collect::<Vec<_>>();
+    let raw_parts = raw.split_whitespace().collect::<Vec<_>>();
+    if line_parts.len() == 2
+        && line_parts
+            .iter()
+            .all(|part| part.chars().all(|character| character.is_ascii_digit()))
+        && raw_parts.first() == line_parts.first()
+        && raw_parts.get(1) == line_parts.get(1)
+        && raw_parts.get(2) == Some(&trip_number)
+    {
+        Some(line_parts[0].to_owned())
+    } else {
+        Some(line_number.to_owned())
+    }
 }
 
 fn movement_in_live_window(movement: &StoredMovement, current_minute: i32) -> bool {
@@ -684,6 +1060,7 @@ mod tests {
             uploaded_at: 20,
             enabled,
             day_segment: segment.to_owned(),
+            division_id: String::new(),
             content_hash: Some("abc".to_owned()),
             parse_result: serde_json::json!({
                 "diensten": [{"id": "d1"}],
@@ -720,6 +1097,20 @@ mod tests {
     }
 
     #[test]
+    fn schedule_revision_filters_divisions() {
+        let mut standard = record("weekday", true);
+        standard.division_id = "standaard".to_owned();
+        let mut other = record("weekday", true);
+        other.id = "bestand-2".to_owned();
+        other.division_id = "gd".to_owned();
+        let selected = BTreeSet::from(["standaard".to_owned()]);
+        assert_eq!(
+            schedule_revision(&[standard.clone(), other], "weekday", &selected),
+            schedule_revision(&[standard], "weekday", &selected)
+        );
+    }
+
+    #[test]
     fn live_etag_ignores_feed_timestamp_only_changes() {
         let first = serde_json::json!({"statuses": [{"movementId": "m1", "delaySeconds": 60, "updatedAt": 100}]});
         let second = serde_json::json!({"statuses": [{"movementId": "m1", "delaySeconds": 60, "updatedAt": 200}]});
@@ -736,5 +1127,51 @@ mod tests {
         assert_eq!(segment_for_date("2026-07-17").unwrap(), "weekday");
         assert_eq!(segment_for_date("2026-07-18").unwrap(), "saturday");
         assert_eq!(segment_for_date("2026-07-19").unwrap(), "sunday");
+    }
+
+    #[test]
+    fn legacy_ov_chip_number_is_removed_from_live_line() {
+        assert_eq!(
+            without_legacy_ov_chip_number(
+                Some("63 53"),
+                Some("8034"),
+                "63 53 8034 436301 14:04 GnCS B2 LwoHaven 15:22",
+            ),
+            Some("63".to_owned())
+        );
+        assert_eq!(
+            without_legacy_ov_chip_number(
+                Some("178 665"),
+                Some("8035"),
+                "178 665 8035 436311 13:41 SdbLwrht GnCS 14:30",
+            ),
+            Some("178".to_owned())
+        );
+    }
+
+    #[test]
+    fn regular_live_line_number_is_left_unchanged() {
+        assert_eq!(
+            without_legacy_ov_chip_number(
+                Some("401"),
+                Some("7053"),
+                "401 7053 807772 21:00 LDN CS G ZTM CEW 21:28",
+            ),
+            Some("401".to_owned())
+        );
+    }
+
+    #[test]
+    fn admin_settings_are_trimmed_and_deduplicated() {
+        let settings = normalize_admin_settings(AdminSettings {
+            busless_actions: vec![
+                "  Rij   mee ".to_owned(),
+                "rij mee".to_owned(),
+                String::new(),
+                "REIS".to_owned(),
+            ],
+        })
+        .unwrap();
+        assert_eq!(settings.busless_actions, vec!["Rij mee", "REIS"]);
     }
 }

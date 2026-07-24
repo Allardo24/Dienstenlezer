@@ -45,6 +45,26 @@ export type ParseResult = {
 
 export type DaySegment = "weekday" | "saturday" | "sunday" | "unassigned";
 
+export type Concession = {
+  id: string;
+  name: string;
+};
+
+export type Division = {
+  id: string;
+  name: string;
+  concessionId: string;
+};
+
+export type OrganizationConfig = {
+  concessions: Concession[];
+  divisions: Division[];
+};
+
+export type AdminSettings = {
+  buslessActions: string[];
+};
+
 export type StoredPdfFile = {
   id: string;
   name: string;
@@ -53,6 +73,7 @@ export type StoredPdfFile = {
   uploadedAt: number;
   enabled: boolean;
   daySegment: DaySegment;
+  divisionId: string;
   contentHash?: string;
   file?: Blob;
   parseResult: ParseResult;
@@ -67,12 +88,17 @@ export type StoredPdfCatalog = {
   schemaVersion: number;
   revision: string;
   segmentRevisions: Record<DaySegment, string>;
+  organization: OrganizationConfig;
+  adminSettings: AdminSettings;
   files: StoredPdfFileSummary[];
 };
 
 export type StoredSchedule = {
   schemaVersion: number;
+  key: string;
   segment: DaySegment;
+  divisionIds: string[];
+  catalogRevision: string;
   revision: string;
   results: ParseResult[];
 };

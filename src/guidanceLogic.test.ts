@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { hasInterveningDriver, type DutyVehicleInterval } from "./guidanceLogic";
+import { hasInterveningDriver, toOperationalMinute, type DutyVehicleInterval } from "./guidanceLogic";
 
 const previous: DutyVehicleInterval = {
   loop: "806601",
@@ -39,5 +39,12 @@ describe("hasInterveningDriver", () => {
       { loop: "806602", serviceNumber: "V6002", start: 9 * 60, end: 10 * 60 },
       { loop: "806601", serviceNumber: "V6003", start: 7 * 60, end: 8 * 60 },
     ])).toBe(false);
+  });
+});
+
+describe("toOperationalMinute", () => {
+  it("begint de nieuwe operationele dag exact om 04:00", () => {
+    expect(toOperationalMinute(3 * 60 + 59)).toBe(27 * 60 + 59);
+    expect(toOperationalMinute(4 * 60)).toBe(4 * 60);
   });
 });

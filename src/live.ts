@@ -13,19 +13,26 @@ type StoredLiveResponse = {
 
 export type CachedLiveResponse = StoredLiveResponse;
 
-export function getCachedQbuzzLiveStatuses(date: string, now = Date.now()): CachedLiveResponse | undefined {
+export function getCachedQbuzzLiveStatuses(
+  date: string,
+  divisionIdsOrNow: string[] | number = [],
+  requestedNow = Date.now(),
+): CachedLiveResponse | undefined {
   if (typeof window === "undefined") {
     return undefined;
   }
 
+  const divisionIds = Array.isArray(divisionIdsOrNow) ? divisionIdsOrNow : [];
+  const now = typeof divisionIdsOrNow === "number" ? divisionIdsOrNow : requestedNow;
   try {
-    const raw = window.localStorage.getItem(`${LIVE_CACHE_PREFIX}${date}`);
+    const key = liveScopeKey(date, divisionIds);
+    const raw = window.localStorage.getItem(`${LIVE_CACHE_PREFIX}${key}`);
     if (!raw) {
       return undefined;
     }
     const cached = JSON.parse(raw) as StoredLiveResponse;
     if (!cached.savedAt || !cached.response?.statuses || now - cached.savedAt > LIVE_CACHE_MAX_AGE_MS) {
-      window.localStorage.removeItem(`${LIVE_CACHE_PREFIX}${date}`);
+      window.localStorage.removeItem(`${LIVE_CACHE_PREFIX}${key}`);
       return undefined;
     }
     return cached;
@@ -34,21 +41,21 @@ export function getCachedQbuzzLiveStatuses(date: string, now = Date.now()): Cach
   }
 }
 
-function storeCachedQbuzzLiveStatuses(date: string, response: LiveStatusResponse) {
+function storeCachedQbuzzLiveStatuses(date: string, divisionIds: string[], response: LiveStatusResponse) {
   if (typeof window === "undefined") {
     return;
   }
 
   try {
     const cached: StoredLiveResponse = { savedAt: Date.now(), response };
-    window.localStorage.setItem(`${LIVE_CACHE_PREFIX}${date}`, JSON.stringify(cached));
+    window.localStorage.setItem(`${LIVE_CACHE_PREFIX}${liveScopeKey(date, divisionIds)}`, JSON.stringify(cached));
   } catch {
     // Live blijft werken als de browseropslag vol of uitgeschakeld is.
   }
 }
 
-function retainKnownVehicleIds(date: string, response: LiveStatusResponse): LiveStatusResponse {
-  const cached = getCachedQbuzzLiveStatuses(date);
+function retainKnownVehicleIds(date: string, divisionIds: string[], response: LiveStatusResponse): LiveStatusResponse {
+  const cached = getCachedQbuzzLiveStatuses(date, divisionIds);
   if (!cached) {
     return response;
   }
@@ -70,29 +77,37 @@ export function isDesktopLiveAvailable(): boolean {
   return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 }
 
-export async function getQbuzzLiveStatuses(date: string, movements: LiveMovementRequest[]): Promise<LiveStatusResponse> {
+export async function getQbuzzLiveStatuses(
+  date: string,
+  movements: LiveMovementRequest[],
+  divisionIds: string[] = [],
+): Promise<LiveStatusResponse> {
+  const scopeKey = liveScopeKey(date, divisionIds);
   if (isDesktopLiveAvailable()) {
     const { invoke } = await import("@tauri-apps/api/core");
     const result = retainKnownVehicleIds(
       date,
+      divisionIds,
       await invoke<LiveStatusResponse>("get_qbuzz_live_statuses", { date, movements }),
     );
-    storeCachedQbuzzLiveStatuses(date, result);
+    storeCachedQbuzzLiveStatuses(date, divisionIds, result);
     return result;
   }
 
   const headers = new Headers();
-  const knownEtag = webLiveEtags.get(date);
+  const knownEtag = webLiveEtags.get(scopeKey);
   if (knownEtag) {
     headers.set("If-None-Match", knownEtag);
   }
-  const response = await fetch(serverUrl(`/api/qbuzz/live?date=${encodeURIComponent(date)}`), {
+  const params = new URLSearchParams({ date });
+  params.set("divisions", [...new Set(divisionIds)].sort().join(","));
+  const response = await fetch(serverUrl(`/api/qbuzz/live?${params}`), {
     method: "GET",
     headers,
     cache: "no-cache",
   });
   if (response.status === 304) {
-    const cached = webLiveResponses.get(date);
+    const cached = webLiveResponses.get(scopeKey);
     if (cached) {
       const fetchedAtHeader = response.headers.get("X-DienstenLezer-Live-Fetched-At");
       const fetchedAt = fetchedAtHeader ? Number(fetchedAtHeader) : cached.sync.fetchedAt;
@@ -104,8 +119,8 @@ export async function getQbuzzLiveStatuses(date: string, movements: LiveMovement
           fetchedAt: Number.isFinite(fetchedAt) ? fetchedAt : cached.sync.fetchedAt,
         },
       };
-      webLiveResponses.set(date, refreshed);
-      storeCachedQbuzzLiveStatuses(date, refreshed);
+      webLiveResponses.set(scopeKey, refreshed);
+      storeCachedQbuzzLiveStatuses(date, divisionIds, refreshed);
       return refreshed;
     }
   }
@@ -113,14 +128,18 @@ export async function getQbuzzLiveStatuses(date: string, movements: LiveMovement
     const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
     throw new Error(payload?.error ?? `Live-backend gaf HTTP ${response.status}.`);
   }
-  const result = retainKnownVehicleIds(date, await response.json() as LiveStatusResponse);
+  const result = retainKnownVehicleIds(date, divisionIds, await response.json() as LiveStatusResponse);
   const etag = response.headers.get("ETag");
   if (etag) {
-    webLiveEtags.set(date, etag);
-    webLiveResponses.set(date, result);
+    webLiveEtags.set(scopeKey, etag);
+    webLiveResponses.set(scopeKey, result);
   }
-  storeCachedQbuzzLiveStatuses(date, result);
+  storeCachedQbuzzLiveStatuses(date, divisionIds, result);
   return result;
+}
+
+function liveScopeKey(date: string, divisionIds: string[]): string {
+  return `${date}:${[...new Set(divisionIds)].sort().join(",")}`;
 }
 
 export async function listenToQbuzzSyncProgress(onProgress: (progress: LiveSyncState) => void): Promise<() => void> {

@@ -1,5 +1,14 @@
 # Wijzigingen
 
+## 1.3.4
+
+- Pdf-bestanden kunnen per divisie worden ingedeeld en divisies kunnen centraal onder concessies worden gegroepeerd.
+- Elke client kan zelfstandig een of meerdere divisies voor de overzichten selecteren.
+- Busloze chauffeursacties zijn centraal instelbaar en worden niet meer onterecht aan de vorige omloop gekoppeld.
+- Afwijkende dienstbladen met een extra OV-chipkolom worden correct weergegeven.
+- Instellingen zijn verdeeld over duidelijke tabs; het volledige bestandenbeheer staat nu onder Instellingen.
+- Dienstbegeleiding begint na de operationele daggrens van 04:00 opnieuw bij het begin van de dienst.
+
 ## 1.3.3
 
 - Ritdelen die door een chauffeurswissel zijn gesplitst worden in het omloopoverzicht als een herkenbaar geheel weergegeven.

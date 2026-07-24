@@ -78,7 +78,7 @@ describe("web live-api", () => {
     expect(response.statuses[0].vehicleId).toBe(response.statuses[1].vehicleId);
     expect(response.diagnostics?.vehicleUpdates).toBe(2);
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/qbuzz/live?date=2026-07-12",
+      "/api/qbuzz/live?date=2026-07-12&divisions=",
       expect.objectContaining({ method: "GET" }),
     );
     expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("body");

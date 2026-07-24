@@ -5,6 +5,12 @@ export type DutyVehicleInterval = {
   end: number;
 };
 
+export const OPERATIONAL_DAY_START_MINUTE = 4 * 60;
+
+export function toOperationalMinute(minute: number): number {
+  return minute < OPERATIONAL_DAY_START_MINUTE ? minute + 24 * 60 : minute;
+}
+
 export function hasInterveningDriver(
   previous: DutyVehicleInterval,
   current: DutyVehicleInterval,

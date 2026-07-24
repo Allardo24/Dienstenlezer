@@ -351,14 +351,14 @@ pub async fn get_live_statuses(
         });
         let handover_delay_seconds = handover_prediction
             .as_ref()
-            .and_then(|prediction| stop_arrival_delay(*prediction))
+            .and_then(|prediction| stop_arrival_delay(prediction))
             .or_else(|| update.and_then(|value| instantaneous_delay(value, vehicle_position)));
         let arrival_prediction = trip.and_then(|candidate| {
             update.and_then(|value| arrival_prediction(value, candidate))
         });
         let arrival_delay_seconds = arrival_prediction
             .as_ref()
-            .and_then(|prediction| stop_arrival_delay(*prediction))
+            .and_then(|prediction| stop_arrival_delay(prediction))
             .or_else(|| update.and_then(|value| instantaneous_delay(value, vehicle_position)));
         let current_delay_seconds = update.and_then(|value| instantaneous_delay(value, vehicle_position));
         if current_delay_seconds.is_some() {
@@ -370,8 +370,8 @@ pub async fn get_live_statuses(
             matched: trip.is_some(),
             delay_seconds: current_delay_seconds,
             handover_delay_seconds,
-            handover_expected_at: handover_prediction.as_ref().and_then(|prediction| stop_arrival_expected_at(*prediction)),
-            handover_departure_expected_at: handover_prediction.as_ref().and_then(|prediction| stop_departure_expected_at(*prediction)),
+            handover_expected_at: handover_prediction.as_ref().and_then(|prediction| stop_arrival_expected_at(prediction)),
+            handover_departure_expected_at: handover_prediction.as_ref().and_then(|prediction| stop_departure_expected_at(prediction)),
             handover_departed: trip.and_then(|candidate| {
                 vehicle_position
                     .and_then(|position| position.current_stop_sequence)
@@ -380,7 +380,7 @@ pub async fn get_live_statuses(
             handover_stop_specific: handover_prediction.as_ref().map(|_| true),
             handover_planned_time: trip.map(|value| value.handover_arrival.clone()).filter(|value| !value.is_empty()),
             arrival_delay_seconds,
-            arrival_expected_at: arrival_prediction.as_ref().and_then(|prediction| stop_arrival_expected_at(*prediction)),
+            arrival_expected_at: arrival_prediction.as_ref().and_then(|prediction| stop_arrival_expected_at(prediction)),
             arrival_stop_specific: arrival_prediction.as_ref().map(|_| true),
             trip_id: trip.map(|value| value.trip_id.clone()),
             vehicle_id,
@@ -707,7 +707,7 @@ fn format_wait_duration(seconds: u64) -> String {
         return format!("nog {seconds} seconden");
     }
 
-    let minutes = (seconds + 59) / 60;
+    let minutes = seconds.div_ceil(60);
     format!("ongeveer {minutes} minuten")
 }
 
@@ -1227,7 +1227,7 @@ fn optional_column(headers: &csv::StringRecord, name: &str) -> Option<usize> {
     headers.iter().position(|header| header == name)
 }
 
-fn optional_value<'a>(record: &'a csv::StringRecord, column: Option<usize>) -> Option<&'a str> {
+fn optional_value(record: &csv::StringRecord, column: Option<usize>) -> Option<&str> {
     column.and_then(|index| record.get(index)).filter(|value| !value.is_empty())
 }
 
