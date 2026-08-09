@@ -1,5 +1,10 @@
 # Wijzigingen
 
+## 1.4.1
+
+- Herstelt de ARM64- en AMD64-containerbuild zodat altijd de volledige DienstenLezer-server wordt gepubliceerd.
+- Gepubliceerde containers worden voortaan daadwerkelijk gestart en via `/api/health` gecontroleerd voordat het Home Assistant-image wordt vrijgegeven.
+
 ## 1.4.0
 
 - Accounts met gebruikers- en adminrollen, langdurige sessies en servergecontroleerde beheertoegang toegevoegd.

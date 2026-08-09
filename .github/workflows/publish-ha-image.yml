@@ -60,6 +60,32 @@ jobs:
           cache-to: type=gha,scope=ha-${{ matrix.arch }},mode=max
           provenance: false
 
+      - name: Gepubliceerd image opstarten
+        shell: bash
+        run: |
+          image="${{ steps.info.outputs.image }}:${{ steps.info.outputs.version }}-${{ matrix.arch }}"
+          container="dienstenlezer-smoke-${{ matrix.arch }}"
+          trap 'docker rm --force --volumes "$container" >/dev/null 2>&1 || true' EXIT
+
+          docker pull "$image"
+          docker run --detach --name "$container" --publish 127.0.0.1:18080:8080 "$image"
+
+          for attempt in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/api/health >/dev/null; then
+              exit 0
+            fi
+
+            if [[ "$(docker inspect --format '{{.State.Running}}' "$container")" != "true" ]]; then
+              docker logs "$container"
+              exit 1
+            fi
+
+            sleep 1
+          done
+
+          docker logs "$container"
+          exit 1
+
   manifest:
     name: Combineer multi-architecture image
     needs: build

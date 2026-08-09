@@ -15,7 +15,8 @@ RUN mkdir -p src-tauri/src/bin \
     && printf 'fn main() {}\n' > src-tauri/src/bin/dienstenlezer-server.rs \
     && cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin dienstenlezer-server
 COPY src-tauri/src ./src-tauri/src
-RUN cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin dienstenlezer-server
+RUN touch src-tauri/src/lib.rs src-tauri/src/bin/dienstenlezer-server.rs \
+    && cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin dienstenlezer-server
 
 FROM debian:bookworm-slim
 ARG BUILD_VERSION=dev
