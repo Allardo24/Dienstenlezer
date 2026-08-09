@@ -1,6 +1,6 @@
 # DienstenLezer
 
-DienstenLezer leest diensten-pdf's uit, visualiseert omlopen en diensten en koppelt de planning aan actuele Qbuzz-gegevens. Dezelfde codebase werkt als lokale ontwikkelapp, als website met backend en als Windows-app.
+DienstenLezer leest diensten-pdf's uit, visualiseert omlopen en diensten en koppelt de planning aan actuele Qbuzz-gegevens. Dezelfde codebase werkt lokaal, als zelfstandige webserver en als Home Assistant-app.
 
 ## Lokale ontwikkeling
 
@@ -36,7 +36,7 @@ npm run ha:addon:check
 
 Het uitgepakte pakket staat daarna in `artifacts/home-assistant/` en als archief in `artifacts/dienstenlezer-home-assistant.tar.gz`. Pdf's, opgeslagen planningen en de Qbuzz-cache komen niet in het image terecht; de app bewaart die blijvend in Home Assistant-map `/data`.
 
-De volledige proef-, migratie- en terugvalvolgorde staat in `deploy/home-assistant/MIGRATION.md`. De gewone Windows-ontwikkeling, webserver en exe-build blijven daarnaast beschikbaar.
+De volledige proef-, migratie- en terugvalvolgorde staat in `deploy/home-assistant/MIGRATION.md`. De gewone Windows-ontwikkeling en zelfstandige webserver blijven daarnaast beschikbaar.
 
 ## Website op een domein
 
@@ -78,22 +78,6 @@ Start daarna `src-tauri/target/release/dienstenlezer-server` vanuit de projectma
 - `DIENSTENLEZER_BIND`: luisteradres, standaard `127.0.0.1:8080`.
 - `DIENSTENLEZER_DATA_DIR`: blijvende datamap, standaard `server-data`.
 - `DIENSTENLEZER_WEB_DIR`: map met de webbuild, standaard `dist`.
-
-## Windows-app
-
-De exe blijft beschikbaar. Ontwikkelen:
-
-```powershell
-npm run desktop:dev
-```
-
-Een installer maken:
-
-```powershell
-npm run desktop:build
-```
-
-De Windows-app gebruikt dezelfde livekern, maar houdt zijn pdf-bank lokaal op de computer. De domeinversie en de exe delen dus niet automatisch dezelfde geuploade bestanden.
 
 ## Controles
 

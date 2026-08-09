@@ -11,16 +11,27 @@ import {
   Loader2,
   Navigation,
   Plus,
+  RefreshCw,
   RotateCcw,
   Search,
   Settings,
   Table2,
   Trash2,
   Upload,
+  UserRound,
   X,
 } from "lucide-react";
-import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, isDesktopLiveAvailable, listenToQbuzzSyncProgress, plannedMarkerMinute } from "./live";
+import AccountPage, { AccountManagement } from "./AccountPage";
+import { AchievementManagement } from "./PersonalDataPanel";
+import DutyConfirmation from "./DutyConfirmation";
+import { accountsAvailable, getSetupStatus, logout, restoreSession, type AuthSession } from "./auth";
+import WageSettingsPanel from "./wage/WageSettingsPanel";
+import { calculateDutyWage } from "./wage/calculate";
+import { deleteWageSettings, readWageSettings, writeWageSettings } from "./wage/storage";
+import { DEFAULT_WAGE_SETTINGS, type WageSettings } from "./wage/types";
+import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, plannedMarkerMinute } from "./live";
 import { hasInterveningDriver, toOperationalMinute, type DutyVehicleInterval } from "./guidanceLogic";
+import { calculateTakeoverStatus, resolveTakeoverArrivalMinute, resolveTakeoverPlannedMinute } from "./takeoverStatus";
 import { isBuslessDriverRow, withoutLegacyOvChipNumber } from "./pdfColumns";
 import { DEFAULT_BUSLESS_ACTIONS, normaliseBuslessActions } from "./buslessActions";
 import {
@@ -31,6 +42,7 @@ import {
   getCachedStoredData,
   getStoredPdfCatalog,
   getStoredSchedule,
+  reparseStoredPdfFiles,
   saveAdminSettings,
   saveStoredPdfFile,
   saveOrganizationConfig,
@@ -66,7 +78,7 @@ const DESKTOP_LOOP_COLUMN_WIDTH = 170;
 const MOBILE_LOOP_COLUMN_WIDTH = 84;
 const GUIDANCE_LOCK_KEY = "dienstenlezer-locked-guidance-service";
 const SELECTED_DIVISIONS_KEY = "dienstenlezer-selected-divisions-v1";
-type Page = "loops" | "services" | "guidance" | "settings";
+type Page = "loops" | "services" | "guidance" | "settings" | "account";
 
 const DAY_SEGMENTS: { id: DaySegment; label: string; description: string }[] = [
   { id: "weekday", label: "Ma-vr", description: "Werkdagen" },
@@ -163,6 +175,11 @@ function App() {
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [isPageVisible, setIsPageVisible] = useState(() => document.visibilityState !== "hidden");
   const [buslessActions, setBuslessActions] = useState<string[]>([...DEFAULT_BUSLESS_ACTIONS]);
+  const [authSession, setAuthSession] = useState<AuthSession>();
+  const [authLoading, setAuthLoading] = useState(accountsAvailable);
+  const [authSetupRequired, setAuthSetupRequired] = useState(false);
+  const [authError, setAuthError] = useState<string>();
+  const [wageSettings, setWageSettings] = useState<WageSettings>();
 
   const selectedDaySegment = useMemo(() => daySegmentForDate(selectedDate), [selectedDate]);
   const selectedScheduleScope = useMemo(
@@ -241,7 +258,6 @@ function App() {
   );
   const timelineLoops = useMemo(() => orderedLoops(timelineMovements), [timelineMovements]);
   const isToday = selectedDate === todayInputValue();
-  const desktopLiveAvailable = isDesktopLiveAvailable();
   const liveRequested = page === "loops" || page === "guidance";
   const guidanceCurrentTime = useMemo(
     () => withTimeOverride(currentTime, guidanceTimeOverride),
@@ -251,6 +267,58 @@ function App() {
   useEffect(() => {
     void reloadStoredFiles();
   }, []);
+
+  useEffect(() => {
+    if (!authSession) {
+      setWageSettings(undefined);
+      return;
+    }
+    let cancelled = false;
+    void readWageSettings(authSession.account.id)
+      .then((settings) => {
+        if (!cancelled) setWageSettings(settings);
+      })
+      .catch((error) => {
+        if (!cancelled) setStorageError(error instanceof Error ? error.message : String(error));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [authSession?.account.id]);
+
+  useEffect(() => {
+    if (!accountsAvailable()) {
+      setAuthLoading(false);
+      return;
+    }
+    let cancelled = false;
+    void Promise.all([restoreSession(), getSetupStatus()])
+      .then(([session, setupRequired]) => {
+        if (!cancelled) {
+          setAuthSession(session);
+          setAuthSetupRequired(setupRequired);
+        }
+      })
+      .catch((error) => {
+        if (!cancelled) {
+          setAuthError(error instanceof Error ? error.message : String(error));
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setAuthLoading(false);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!authLoading) {
+      void reloadStoredFiles();
+    }
+  }, [authLoading, authSession?.account.role]);
 
   useEffect(() => {
     function updateVisibility() {
@@ -272,19 +340,6 @@ function App() {
       void reloadStoredFiles();
     }
   }, [selectedScheduleScope]);
-
-  useEffect(() => {
-    if (!desktopLiveAvailable) {
-      return;
-    }
-
-    let unlisten: () => void = () => undefined;
-    void listenToQbuzzSyncProgress((sync) => setLiveResponse((current) => ({ ...current, sync }))).then((dispose) => {
-      unlisten = dispose;
-    });
-
-    return () => unlisten();
-  }, [desktopLiveAvailable]);
 
   useEffect(() => {
     if (!liveRequested) {
@@ -378,7 +433,7 @@ function App() {
         window.clearTimeout(timer);
       }
     };
-  }, [desktopLiveAvailable, isPageVisible, isToday, liveRequested, liveTimelineMovements, selectedDate, selectedScheduleScope]);
+  }, [isPageVisible, isToday, liveRequested, liveTimelineMovements, selectedDate, selectedScheduleScope]);
 
   async function reloadStoredFiles(requestedDivisionIds = selectedDivisionIds) {
     const requestId = ++storageRequestIdRef.current;
@@ -517,6 +572,24 @@ function App() {
     await reloadStoredFiles();
   }
 
+  async function reparseStoredFiles() {
+    if (storedFiles.length === 0 || !window.confirm(
+      `Alle ${storedFiles.length} opgeslagen pdf-bestanden opnieuw uitlezen? Dit kan even duren.`,
+    )) {
+      return;
+    }
+    setIsParsing(true);
+    setStorageError(undefined);
+    try {
+      await reparseStoredPdfFiles(storedFiles);
+      await reloadStoredFiles();
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsParsing(false);
+    }
+  }
+
   async function updateOrganization(organizationConfig: OrganizationConfig) {
     setStorageError(undefined);
     try {
@@ -549,6 +622,30 @@ function App() {
     await reloadStoredFiles();
   }
 
+  async function handleLogout() {
+    await logout();
+    setAuthSession(undefined);
+    setPage("loops");
+  }
+
+  function handleAuthSession(session: AuthSession) {
+    setAuthSession(session);
+    setAuthSetupRequired(false);
+    setAuthError(undefined);
+  }
+
+  async function saveLocalWageSettings(settings: WageSettings) {
+    if (!authSession) return;
+    await writeWageSettings(authSession.account.id, settings);
+    setWageSettings(settings);
+  }
+
+  async function removeLocalWageSettings() {
+    if (!authSession) return;
+    await deleteWageSettings(authSession.account.id);
+    setWageSettings({ ...DEFAULT_WAGE_SETTINGS });
+  }
+
   return (
     <main className="app-shell">
       <section className="topbar">
@@ -570,13 +667,23 @@ function App() {
           >
             {page === "settings" ? <Table2 size={19} /> : <Settings size={19} />}
           </button>
+          {accountsAvailable() && (
+            <button
+              className={page === "account" ? "icon-button active" : "icon-button"}
+              type="button"
+              onClick={() => setPage((value) => (value === "account" ? "loops" : "account"))}
+              title={authSession ? `Account ${authSession.account.username}` : "Account"}
+            >
+              <UserRound size={19} />
+            </button>
+          )}
           <button className="icon-button danger" type="button" onClick={resetView} disabled={!query && includeNoLoop} title="Filters leegmaken">
             <X size={19} />
           </button>
         </div>
       </section>
 
-      {page !== "settings" && (
+      {page !== "settings" && page !== "account" && (
         <nav className="overview-tabs" aria-label="Overzichten">
           <button className={page === "loops" ? "active" : ""} type="button" onClick={() => setPage("loops")}>
             <span className="tab-long">Omloop overzicht</span><span className="tab-short">Omlopen</span>
@@ -609,7 +716,16 @@ function App() {
         </section>
       )}
 
-      {page === "settings" ? (
+      {page === "account" ? (
+        <AccountPage
+          session={authSession}
+          setupRequired={authSetupRequired}
+          loading={authLoading}
+          error={authError}
+          onSession={handleAuthSession}
+          onLogout={handleLogout}
+        />
+      ) : page === "settings" ? (
         <SettingsPage
           organization={organization}
           files={storedFiles}
@@ -629,7 +745,13 @@ function App() {
           onToggleFile={toggleStoredFile}
           onMoveFile={moveStoredFile}
           onMoveFileDivision={moveStoredFileToDivision}
+          onReparseFiles={reparseStoredFiles}
           onDeleteFile={removeStoredFile}
+          canManageServer={!accountsAvailable() || authSession?.account.role === "admin"}
+          isAdmin={authSession?.account.role === "admin"}
+          wageSettings={authSession ? wageSettings : undefined}
+          onWageSettingsChange={saveLocalWageSettings}
+          onWageSettingsDelete={removeLocalWageSettings}
         />
       ) : page === "guidance" ? (
         <DutyGuidance
@@ -647,6 +769,9 @@ function App() {
           onLockedChange={updateGuidanceLock}
           isDemo={false}
           isToday={isToday}
+          selectedDate={selectedDate}
+          wageSettings={authSession ? wageSettings : undefined}
+          personalEnabled={Boolean(authSession)}
         />
       ) : (
         <>
@@ -839,7 +964,13 @@ function SettingsPage({
   onToggleFile,
   onMoveFile,
   onMoveFileDivision,
+  onReparseFiles,
   onDeleteFile,
+  canManageServer,
+  isAdmin,
+  wageSettings,
+  onWageSettingsChange,
+  onWageSettingsDelete,
 }: {
   organization: OrganizationConfig;
   files: StoredPdfFileSummary[];
@@ -859,9 +990,15 @@ function SettingsPage({
   onToggleFile: (file: StoredPdfFileSummary) => Promise<void>;
   onMoveFile: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveFileDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onReparseFiles: () => Promise<void>;
   onDeleteFile: (file: StoredPdfFileSummary) => Promise<void>;
+  canManageServer: boolean;
+  isAdmin: boolean;
+  wageSettings?: WageSettings;
+  onWageSettingsChange: (settings: WageSettings) => Promise<void>;
+  onWageSettingsDelete: () => Promise<void>;
 }) {
-  const [settingsTab, setSettingsTab] = useState<"general" | "files" | "client" | "server">("client");
+  const [settingsTab, setSettingsTab] = useState<"general" | "files" | "client" | "server" | "accounts" | "achievements">("client");
   const [newAction, setNewAction] = useState("");
   const [newConcessionName, setNewConcessionName] = useState("");
   const [newDivisionName, setNewDivisionName] = useState("");
@@ -874,6 +1011,12 @@ function SettingsPage({
       setNewDivisionConcessionId(organization.concessions[0]?.id ?? "");
     }
   }, [newDivisionConcessionId, organization.concessions]);
+
+  useEffect(() => {
+    if (!isAdmin && (settingsTab === "accounts" || settingsTab === "achievements")) {
+      setSettingsTab("client");
+    }
+  }, [isAdmin, settingsTab]);
 
   function addAction(event: React.FormEvent) {
     event.preventDefault();
@@ -949,7 +1092,11 @@ function SettingsPage({
           <div>
             <h2>Instellingen</h2>
             <span>
-              {settingsTab === "server"
+              {settingsTab === "accounts"
+                ? "Gebruikers en toegang beheren"
+                : settingsTab === "achievements"
+                  ? "Badges, voorwaarden en correcties beheren"
+                  : settingsTab === "server"
                 ? "Serverinstellingen voor alle clients"
                 : settingsTab === "client"
                   ? "Alleen op dit apparaat"
@@ -967,15 +1114,17 @@ function SettingsPage({
           >
             Algemeen
           </button>
-          <button
-            className={settingsTab === "files" ? "active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={settingsTab === "files"}
-            onClick={() => setSettingsTab("files")}
-          >
-            Bestanden
-          </button>
+          {canManageServer && (
+            <button
+              className={settingsTab === "files" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "files"}
+              onClick={() => setSettingsTab("files")}
+            >
+              Bestanden
+            </button>
+          )}
           <button
             className={settingsTab === "client" ? "active" : ""}
             type="button"
@@ -985,19 +1134,43 @@ function SettingsPage({
           >
             Clientinstellingen
           </button>
-          <button
-            className={settingsTab === "server" ? "active" : ""}
-            type="button"
-            role="tab"
-            aria-selected={settingsTab === "server"}
-            onClick={() => setSettingsTab("server")}
-          >
-            Serverinstellingen
-          </button>
+          {canManageServer && (
+            <button
+              className={settingsTab === "server" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "server"}
+              onClick={() => setSettingsTab("server")}
+            >
+              Serverinstellingen
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              className={settingsTab === "accounts" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "accounts"}
+              onClick={() => setSettingsTab("accounts")}
+            >
+              Accounts
+            </button>
+          )}
+          {isAdmin && (
+            <button
+              className={settingsTab === "achievements" ? "active" : ""}
+              type="button"
+              role="tab"
+              aria-selected={settingsTab === "achievements"}
+              onClick={() => setSettingsTab("achievements")}
+            >
+              Achievements
+            </button>
+          )}
         </nav>
       </div>
 
-      <div className={settingsTab === "files" ? "settings-content settings-content-wide" : "settings-content"}>
+      <div className={["files", "accounts", "achievements"].includes(settingsTab) ? "settings-content settings-content-wide" : "settings-content"}>
         {settingsTab === "general" && (
           <section className="settings-group">
             <div className="settings-group-heading">
@@ -1013,7 +1186,7 @@ function SettingsPage({
           </section>
         )}
 
-        {settingsTab === "files" && (
+        {canManageServer && settingsTab === "files" && (
           <FileManagementTab
             files={files}
             organization={organization}
@@ -1026,27 +1199,37 @@ function SettingsPage({
             onToggle={onToggleFile}
             onMove={onMoveFile}
             onMoveDivision={onMoveFileDivision}
+            onReparseFiles={onReparseFiles}
             onDelete={onDeleteFile}
           />
         )}
 
         {settingsTab === "client" && (
-          <section className="settings-group">
-            <div className="settings-group-heading">
-              <div>
-                <h3>Getoonde divisies</h3>
-                <span>Kies welke divisies in de overzichten en dienstbegeleiding worden geladen.</span>
+          <>
+            <section className="settings-group">
+              <div className="settings-group-heading">
+                <div>
+                  <h3>Getoonde divisies</h3>
+                  <span>Kies welke divisies in de overzichten en dienstbegeleiding worden geladen.</span>
+                </div>
               </div>
-            </div>
-            <DivisionSelectionPanel
-              organization={organization}
-              selectedDivisionIds={selectedDivisionIds}
-              onChange={onSelectedDivisionsChange}
-            />
-          </section>
+              <DivisionSelectionPanel
+                organization={organization}
+                selectedDivisionIds={selectedDivisionIds}
+                onChange={onSelectedDivisionsChange}
+              />
+            </section>
+            {wageSettings && (
+              <WageSettingsPanel
+                settings={wageSettings}
+                onSave={onWageSettingsChange}
+                onDelete={onWageSettingsDelete}
+              />
+            )}
+          </>
         )}
 
-        {settingsTab === "server" && (
+        {canManageServer && settingsTab === "server" && (
           <>
         <section className="settings-group">
           <div className="settings-group-heading">
@@ -1211,6 +1394,9 @@ function SettingsPage({
         </section>
           </>
         )}
+
+        {isAdmin && settingsTab === "accounts" && <AccountManagement />}
+        {isAdmin && settingsTab === "achievements" && <AchievementManagement divisions={organization.divisions} />}
       </div>
     </section>
   );
@@ -1228,6 +1414,7 @@ function FileManagementTab({
   onToggle,
   onMove,
   onMoveDivision,
+  onReparseFiles,
   onDelete,
 }: {
   files: StoredPdfFileSummary[];
@@ -1241,6 +1428,7 @@ function FileManagementTab({
   onToggle: (file: StoredPdfFileSummary) => Promise<void>;
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onReparseFiles: () => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
   return (
@@ -1297,6 +1485,17 @@ function FileManagementTab({
           <span>Alle verwerking gebeurt lokaal in deze app.</span>
         </div>
       </section>
+
+      <div className="settings-group-heading file-reparse-heading">
+        <div>
+          <h3>Opgeslagen pdf's opnieuw uitlezen</h3>
+          <span>Vult nieuwe velden, zoals materieelsoort, aan zonder bestanden opnieuw te uploaden.</span>
+        </div>
+        <button className="secondary-button" type="button" onClick={() => void onReparseFiles()} disabled={isParsing || files.length === 0}>
+          {isParsing ? <Loader2 className="spin" size={17} /> : <RefreshCw size={17} />}
+          {isParsing ? "Pdf's opnieuw lezen..." : "Opnieuw uitlezen"}
+        </button>
+      </div>
 
       <FilesPage
         files={files}
@@ -1525,6 +1724,7 @@ type GuidanceLiveInfo = {
   handoverDelaySeconds?: number;
   handoverExpectedAt?: number;
   handoverDepartureExpectedAt?: number;
+  handoverArrived?: boolean;
   handoverDeparted?: boolean;
   handoverStopSpecific?: boolean;
   handoverPlannedTime?: string;
@@ -1542,6 +1742,15 @@ type TakeoverArrivalInfo = {
   expectedAt?: number;
   delaySeconds?: number;
   stopSpecific?: boolean;
+  vehicleId?: string;
+};
+
+type GuidanceTakeoverDisplay = ReturnType<typeof calculateTakeoverStatus> & {
+  hasLiveData: boolean;
+  delaySeconds: number;
+  expectedArrival: string;
+  plannedArrival: string;
+  timingLabel: string;
   vehicleId?: string;
 };
 
@@ -1622,6 +1831,9 @@ function DutyGuidance({
   onLockedChange,
   isDemo,
   isToday,
+  selectedDate,
+  wageSettings,
+  personalEnabled,
 }: {
   services: Dienst[];
   movements: Movement[];
@@ -1637,6 +1849,9 @@ function DutyGuidance({
   onLockedChange: (locked: boolean) => void;
   isDemo: boolean;
   isToday: boolean;
+  selectedDate: string;
+  wageSettings?: WageSettings;
+  personalEnabled: boolean;
 }) {
   const serviceNumbers = [...new Set(services.map((service) => service.serviceNumber))].sort((a, b) => serviceSortKey(a) - serviceSortKey(b));
   const selectedService = services.find((service) => service.serviceNumber.toLowerCase() === selectedServiceNumber.trim().toLowerCase());
@@ -1667,6 +1882,9 @@ function DutyGuidance({
       : currentMinute >= entries.at(-1)!.timing.end
         ? "Dienst afgerond"
         : "Tussen twee acties";
+  const wageEstimate = selectedService && wageSettings
+    ? calculateDutyWage(selectedService, serviceMovements, selectedDate, currentTime, wageSettings)
+    : undefined;
 
   return (
     <div className="guidance-page">
@@ -1737,7 +1955,15 @@ function DutyGuidance({
                 <strong>{selectedService.serviceNumber}</strong>
                 <span>{selectedService.start ?? entries[0]?.movement.vertrek ?? "--:--"} - {selectedService.end ?? entries.at(-1)?.movement.aankomst ?? "--:--"}</span>
               </div>
-              <time>{formatClock(currentTime)}</time>
+              <div className="guidance-duty-status">
+                {wageEstimate && (
+                  <span className="guidance-wage" title="Schatting van basisloon plus ORT, exclusief vakantietoeslagen.">
+                    <small>Geschat bruto</small>
+                    <strong>{formatEuroCents(wageEstimate.earnedCents)} / {formatEuroCents(wageEstimate.totalCents)}</strong>
+                  </span>
+                )}
+                <time>{formatClock(currentTime)}</time>
+              </div>
             </header>
 
             <div className={`guidance-actions${!currentEntry && nextEntry ? " next-only" : ""}`}>
@@ -1747,6 +1973,14 @@ function DutyGuidance({
               <GuidanceAction label="Volgende actie" entry={nextEntry} live={nextLive} fallback="Geen volgende actie" takeover={nextTakeover} takeoverArrival={nextTakeoverArrival} currentMinute={currentMinute} active={!currentEntry && Boolean(nextEntry)} />
             </div>
           </section>
+
+          {personalEnabled && (
+            <DutyConfirmation
+              service={selectedService}
+              operationalDate={selectedDate}
+              dutyFinished={currentMinute >= (entries.at(-1)?.timing.end ?? Number.POSITIVE_INFINITY)}
+            />
+          )}
 
           <section className="guidance-sequence">
             <div className="section-heading">
@@ -1764,7 +1998,7 @@ function DutyGuidance({
 
                 return (
                   <Fragment key={entry.movement.id}>
-                    {takeover && <GuidanceTakeover takeover={takeover} live={live} arrival={findTakeoverArrival(takeover, movements, statusByMovementId)} past={takeover.entry.timing.start <= currentMinute} />}
+                    {takeover && <GuidanceTakeover takeover={takeover} live={live} arrival={findTakeoverArrival(takeover, movements, statusByMovementId)} currentMinute={currentMinute} />}
                     <li className={`guidance-row ${state}`}>
                       <time>
                         <span>{entry.movement.vertrek}</span>
@@ -1850,85 +2084,48 @@ function GuidanceMovementIdentity({ movement, variant }: { movement: Movement; v
 }
 
 function GuidanceTakeoverAlert({ takeover, arrival, live, currentMinute }: { takeover: GuidanceTakeover; arrival?: TakeoverArrivalInfo; live: GuidanceLiveInfo; currentMinute: number }) {
-  const delaySeconds = arrival?.delaySeconds ?? live.handoverDelaySeconds ?? live.delaySeconds ?? 0;
-  const rawDelayed = delaySeconds > 60;
-  const early = delaySeconds < -60;
-  const plannedArrival = arrival?.plannedArrival ?? live.handoverPlannedTime ?? takeover.entry.movement.vertrek;
-  const predicted = arrival?.expectedAt
-    ? formatEpochClock(arrival.expectedAt)
-    : live.handoverExpectedAt
-      ? formatEpochClock(live.handoverExpectedAt)
-      : formatArrivalWithDelay(plannedArrival, delaySeconds);
-  const vehicleId = arrival?.vehicleId ?? live.vehicleId;
-  const expectedArrivalMinute = alignMinuteNearTarget(
-    parseTime(predicted) ?? (parseTime(plannedArrival) ?? takeover.entry.timing.start) + delaySeconds / 60,
-    takeover.entry.timing.start,
-  );
-  const minutesToDeparture = Math.ceil(takeover.entry.timing.start - expectedArrivalMinute);
-  const delayed = rawDelayed && minutesToDeparture <= 7;
-  const expectedDepartureMinute = live.handoverDepartureExpectedAt === undefined
-    ? undefined
-    : alignMinuteNearTarget(parseTime(formatEpochClock(live.handoverDepartureExpectedAt)) ?? takeover.entry.timing.start, takeover.entry.timing.start);
-
-  if (
-    live.handoverDeparted
-    || expectedDepartureMinute !== undefined && currentMinute > expectedDepartureMinute
-    || rawDelayed && minutesToDeparture > 7
-  ) {
+  const display = guidanceTakeoverDisplay(takeover, arrival, live, currentMinute);
+  if (!display.shouldShowTopAlert) {
     return null;
   }
 
+  const showDifference = Math.abs(display.delaySeconds) > 60;
+  const arrivalVerb = display.phase === "arrived" ? "aangekomen om" : "aankomst";
+
   return (
-    <div className={`guidance-action-takeover ${delayed ? "late" : early ? "early" : "on-time"}`}>
+    <div className={`guidance-action-takeover ${display.tone}`}>
       <strong>Overname bij {takeover.entry.movement.van || "halte"}</strong>
       <span>
-        {vehicleId ? <><VehicleLink vehicleId={vehicleId} className="vehicle-inline-link">Bus {vehicleId}</VehicleLink>{" "}</> : "Bus "}
-        {`aankomst ${predicted}${delayed || early ? ` (${formatHandoverDifference(delaySeconds)})` : ""}, ${formatDepartureWindow(minutesToDeparture, takeover.entry.movement.vertrek)}`}
+        {display.vehicleId ? <><VehicleLink vehicleId={display.vehicleId} className="vehicle-inline-link">Bus {display.vehicleId}</VehicleLink>{" "}</> : "Bus "}
+        {`${arrivalVerb} ${display.expectedArrival}${showDifference ? ` (${formatHandoverDifference(display.delaySeconds)})` : ""}, ${formatDepartureWindow(display.minutesToDeparture, takeover.entry.movement.vertrek)}`}
       </span>
     </div>
   );
 }
 
-function GuidanceTakeover({ takeover, live, arrival, past }: { takeover: GuidanceTakeover; live: GuidanceLiveInfo; arrival?: TakeoverArrivalInfo; past: boolean }) {
+function GuidanceTakeover({ takeover, live, arrival, currentMinute }: { takeover: GuidanceTakeover; live: GuidanceLiveInfo; arrival?: TakeoverArrivalInfo; currentMinute: number }) {
   const { movement } = takeover.entry;
-  const hasArrivalData = arrival?.expectedAt !== undefined
-    || arrival?.delaySeconds !== undefined
-    || live.handoverExpectedAt !== undefined
-    || live.handoverDelaySeconds !== undefined
-    || live.delaySeconds !== undefined;
-  const delaySeconds = arrival?.delaySeconds ?? live.handoverDelaySeconds ?? live.delaySeconds ?? 0;
-  const rawDelayed = delaySeconds > 60;
-  const early = delaySeconds < -60;
-  const expectedArrival = arrival?.expectedAt
-    ? formatEpochClock(arrival.expectedAt)
-    : arrival
-      ? formatArrivalWithDelay(arrival.plannedArrival, delaySeconds)
-      : live.handoverExpectedAt
-        ? formatEpochClock(live.handoverExpectedAt)
-        : formatTimelineMinute(takeover.entry.timing.start + delaySeconds / 60);
+  const display = guidanceTakeoverDisplay(takeover, arrival, live, currentMinute);
   const location = movement.van || "de overnamehalte";
-  const timingLabel = arrival?.stopSpecific || live.handoverStopSpecific ? "Aankomst bij halte" : "Geschatte aankomst";
-  const vehicleId = arrival?.vehicleId ?? live.vehicleId;
-  const plannedArrival = arrival?.plannedArrival ?? live.handoverPlannedTime ?? movement.vertrek;
-  const expectedArrivalMinute = alignMinuteNearTarget(
-    parseTime(expectedArrival) ?? (parseTime(plannedArrival) ?? takeover.entry.timing.start) + delaySeconds / 60,
-    takeover.entry.timing.start,
-  );
-  const minutesToDeparture = Math.ceil(takeover.entry.timing.start - expectedArrivalMinute);
-  const delayed = rawDelayed && minutesToDeparture <= 7;
+  const showDifference = Math.abs(display.delaySeconds) > 60;
+  const statusDetail = display.phase === "arrived"
+    ? `Aangekomen om ${display.expectedArrival}`
+    : display.phase === "departed"
+      ? `${display.timingLabel} ${display.expectedArrival}`
+      : `${display.timingLabel} ${display.expectedArrival}${showDifference ? ` (${formatHandoverDifference(display.delaySeconds)})` : ""}`;
 
   return (
-    <li className={`guidance-takeover${hasArrivalData ? ` ${delayed ? "late" : early ? "early" : "on-time"}` : ""}${past ? " past" : ""}${vehicleId ? " has-bus" : ""}${movement.omloopnummer ? " has-loop" : ""}`}>
+    <li className={`guidance-takeover${display.hasLiveData ? ` ${display.tone}` : ""}${display.phase === "departed" ? " past" : ""}${display.vehicleId ? " has-bus" : ""}${movement.omloopnummer ? " has-loop" : ""}`}>
       <span className="guidance-takeover-rail" aria-hidden="true" />
       <div className="guidance-takeover-info">
         <strong>Overname</strong>
-        <span>{location} - gepland: aankomst {plannedArrival}, vertrek {movement.vertrek}</span>
+        <span>{location} - gepland: aankomst {display.plannedArrival}, vertrek {movement.vertrek}</span>
       </div>
-      {vehicleId && (
-        <VehicleLink vehicleId={vehicleId} className="guidance-takeover-bus">
+      {display.vehicleId && (
+        <VehicleLink vehicleId={display.vehicleId} className="guidance-takeover-bus">
           <BusFront size={20} />
           <span>Bus</span>
-          <strong>{vehicleId}</strong>
+          <strong>{display.vehicleId}</strong>
         </VehicleLink>
       )}
       {movement.omloopnummer && (
@@ -1937,14 +2134,10 @@ function GuidanceTakeover({ takeover, live, arrival, past }: { takeover: Guidanc
           <strong>{displayLoopNumber(movement.omloopnummer)}</strong>
         </div>
       )}
-      {hasArrivalData && (
+      {display.hasLiveData && (
         <div className="guidance-takeover-status">
-          <span>{delayed ? "Te laat" : early ? "Te vroeg" : "Op tijd"}</span>
-          <strong>
-            {delayed || early
-              ? `${timingLabel} ${expectedArrival} (${formatHandoverDifference(delaySeconds)})`
-              : `${timingLabel} ${expectedArrival}`}
-          </strong>
+          <span>{display.statusLabel}</span>
+          <strong>{statusDetail}</strong>
         </div>
       )}
     </li>
@@ -2226,6 +2419,7 @@ function TimelineRow({
   const splitTripConnections = buildSplitTripConnections(timedMovements);
   const continuesFromPrevious = new Set(splitTripConnections.map((connection) => connection.toMovementId));
   const continuesToNext = new Set(splitTripConnections.map((connection) => connection.fromMovementId));
+  const splitTripSizingWidths = buildSplitTripSizingWidths(timedMovements, splitTripConnections, minuteWidth);
   const currentLive = liveInfoForLoop(timedMovements, liveStatusByMovementId, currentTimelineMinute);
   const delayMarkers = timedMovements.flatMap(({ movement, timing }) => {
     const status = liveStatusByMovementId.get(movement.id);
@@ -2284,6 +2478,7 @@ function TimelineRow({
             width={(timing.end - timing.start) * minuteWidth}
             continuesFromPrevious={continuesFromPrevious.has(movement.id)}
             continuesToNext={continuesToNext.has(movement.id)}
+            splitTripSizingWidth={splitTripSizingWidths.get(movement.id)}
             onSelect={onSelectMovement}
           />
         ))}
@@ -2333,6 +2528,7 @@ function MovementBlock({
   width,
   continuesFromPrevious,
   continuesToNext,
+  splitTripSizingWidth,
   onSelect,
 }: {
   movement: Movement;
@@ -2340,6 +2536,7 @@ function MovementBlock({
   width: number;
   continuesFromPrevious: boolean;
   continuesToNext: boolean;
+  splitTripSizingWidth?: number;
   onSelect: (movement: Movement) => void;
 }) {
   const hoverTimer = useRef<number | undefined>(undefined);
@@ -2412,7 +2609,14 @@ function MovementBlock({
         <br />
         {movement.aankomst}
       </time>
-      <strong className="movement-line-number">{formatLineLabel(movement.lijnnummer, movement.type)}</strong>
+      <strong
+        className="movement-line-number"
+        style={splitTripSizingWidth === undefined ? undefined : {
+          fontSize: `clamp(0.6rem, ${splitTripSizingWidth * 0.17}px, 1.2rem)`,
+        }}
+      >
+        {formatLineLabel(movement.lijnnummer, movement.type)}
+      </strong>
       <div className="movement-details" ref={detailsRef}>
         <span>{movement.ritnummer ? `rit ${movement.ritnummer}` : labelForType(movement.type)}</span>
         <small>{movement.van} -&gt; {movement.naar}</small>
@@ -2514,6 +2718,7 @@ function MovementTable({
                 <th>Naar</th>
                 <th>Aankomst</th>
                 <th>Type</th>
+                <th>Materieelsoort</th>
                 <th>Bestand</th>
               </tr>
             </thead>
@@ -2521,7 +2726,7 @@ function MovementTable({
               {movements.map((movement) => (
                 <tr key={movement.id}>
                   <td>{movement.dienstnummer}</td>
-                <td>{displayLoopNumber(compactLoopNumber(movement.omloopnummer)) ?? "-"}</td>
+                  <td>{displayLoopNumber(compactLoopNumber(movement.omloopnummer)) ?? "-"}</td>
                   <td>{movement.lijnnummer ?? "-"}</td>
                   <td>{movement.ritnummer ?? "-"}</td>
                   <td>{movement.vertrek}</td>
@@ -2529,6 +2734,7 @@ function MovementTable({
                   <td>{movement.naar}</td>
                   <td>{movement.aankomst}</td>
                   <td>{labelForType(movement.type)}</td>
+                  <td>{movement.materieelsoort ?? "-"}</td>
                   <td>{movement.sourceFile}</td>
                 </tr>
               ))}
@@ -2668,6 +2874,38 @@ function buildSplitTripConnections(
       toMovementId: next.movement.id,
     }];
   });
+}
+
+function buildSplitTripSizingWidths(
+  timedMovements: { movement: Movement; timing: TimelineTiming }[],
+  connections: SplitTripConnection[],
+  minuteWidth: number,
+): Map<string, number> {
+  const timingById = new Map(timedMovements.map(({ movement, timing }) => [movement.id, timing]));
+  const previousById = new Map(connections.map((connection) => [connection.toMovementId, connection.fromMovementId]));
+  const nextById = new Map(connections.map((connection) => [connection.fromMovementId, connection.toMovementId]));
+  const widths = new Map<string, number>();
+
+  for (const connection of connections) {
+    let firstId = connection.fromMovementId;
+    while (previousById.has(firstId)) firstId = previousById.get(firstId)!;
+    if (widths.has(firstId)) continue;
+
+    const movementIds = [firstId];
+    let lastId = firstId;
+    while (nextById.has(lastId)) {
+      lastId = nextById.get(lastId)!;
+      movementIds.push(lastId);
+    }
+
+    const firstTiming = timingById.get(firstId);
+    const lastTiming = timingById.get(lastId);
+    if (!firstTiming || !lastTiming) continue;
+    const combinedWidth = Math.max(0, (lastTiming.end - firstTiming.start) * minuteWidth);
+    movementIds.forEach((movementId) => widths.set(movementId, combinedWidth));
+  }
+
+  return widths;
 }
 
 function normaliseTimelineIdentifier(value: string | undefined): string {
@@ -2859,6 +3097,74 @@ function findTakeoverArrival(
   };
 }
 
+function guidanceTakeoverDisplay(
+  takeover: GuidanceTakeover,
+  arrival: TakeoverArrivalInfo | undefined,
+  live: GuidanceLiveInfo,
+  currentMinute: number,
+): GuidanceTakeoverDisplay {
+  const plannedArrival = arrival?.plannedArrival
+    ?? live.handoverPlannedTime
+    ?? takeover.entry.movement.vertrek;
+  const expectedAt = arrival?.expectedAt ?? live.handoverExpectedAt;
+  const delaySeconds = arrival?.delaySeconds ?? live.handoverDelaySeconds ?? 0;
+  const hasLiveData = expectedAt !== undefined
+    || live.handoverDelaySeconds !== undefined
+    || arrival?.delaySeconds !== undefined
+    || live.handoverArrived === true
+    || live.handoverDeparted === true;
+  const plannedArrivalMinute = alignMinuteNearTarget(
+    parseTime(plannedArrival) ?? takeover.entry.timing.start,
+    takeover.entry.timing.start,
+  );
+  const predictedArrivalMinute = expectedAt === undefined
+    ? undefined
+    : alignMinuteNearTarget(
+      parseTime(formatEpochClock(expectedAt)) ?? plannedArrivalMinute,
+      plannedArrivalMinute,
+    );
+  const expectedArrivalMinute = resolveTakeoverArrivalMinute({
+    plannedArrivalMinute,
+    delaySeconds,
+    predictedArrivalMinute,
+  });
+  const displayedPlannedArrivalMinute = hasLiveData
+    ? resolveTakeoverPlannedMinute({
+      suppliedPlannedMinute: plannedArrivalMinute,
+      expectedArrivalMinute,
+      delaySeconds,
+    })
+    : plannedArrivalMinute;
+  const expectedArrival = formatTimelineMinute(expectedArrivalMinute);
+  const expectedDepartureMinute = live.handoverDepartureExpectedAt === undefined
+    ? undefined
+    : alignMinuteNearTarget(
+      parseTime(formatEpochClock(live.handoverDepartureExpectedAt)) ?? takeover.entry.timing.start,
+      takeover.entry.timing.start,
+    );
+  const departed = live.handoverDeparted === true
+    || expectedDepartureMinute !== undefined && currentMinute > expectedDepartureMinute
+    || !hasLiveData && currentMinute > takeover.entry.timing.start;
+
+  return {
+    ...calculateTakeoverStatus({
+      currentMinute,
+      plannedDepartureMinute: takeover.entry.timing.start,
+      expectedArrivalMinute,
+      delaySeconds,
+      hasLiveData,
+      arrived: live.handoverArrived === true,
+      departed,
+    }),
+    hasLiveData,
+    delaySeconds,
+    expectedArrival,
+    plannedArrival: formatTimelineMinute(displayedPlannedArrivalMinute),
+    timingLabel: arrival?.stopSpecific || live.handoverStopSpecific ? "Aankomst bij halte" : "Geschatte aankomst",
+    vehicleId: live.vehicleId ?? arrival?.vehicleId,
+  };
+}
+
 function alignTimingToTarget(timing: TimelineTiming | undefined, targetStart: number): TimelineTiming | undefined {
   if (!timing) {
     return undefined;
@@ -2951,6 +3257,7 @@ function guidanceLiveInfo(
     handoverDelaySeconds: status?.handoverDelaySeconds,
     handoverExpectedAt: status?.handoverExpectedAt,
     handoverDepartureExpectedAt: status?.handoverDepartureExpectedAt,
+    handoverArrived: status?.handoverArrived,
     handoverDeparted: status?.handoverDeparted,
     handoverStopSpecific: status?.handoverStopSpecific,
     handoverPlannedTime: status?.handoverPlannedTime,
@@ -3023,11 +3330,6 @@ function formatClock(value: Date): string {
 
 function formatEpochClock(epochSeconds: number): string {
   return formatClock(new Date(epochSeconds * 1000));
-}
-
-function formatArrivalWithDelay(plannedArrival: string, delaySeconds: number): string {
-  const minute = parseTime(plannedArrival);
-  return minute === undefined ? plannedArrival : formatTimelineMinute(minute + delaySeconds / 60);
 }
 
 function alignMinuteNearTarget(minute: number, targetMinute: number): number {
@@ -3153,6 +3455,13 @@ function formatMinute(value: number): string {
   const minutes = normalized % 60;
 
   return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function formatEuroCents(cents: number): string {
+  return new Intl.NumberFormat("nl-NL", {
+    style: "currency",
+    currency: "EUR",
+  }).format(cents / 100);
 }
 
 function labelForType(type: Movement["type"]): string {

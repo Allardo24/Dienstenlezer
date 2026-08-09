@@ -12,8 +12,6 @@ use futures_util::StreamExt;
 use prost::Message;
 use reqwest::{header, Client, StatusCode};
 use serde::{Deserialize, Serialize};
-#[cfg(feature = "desktop")]
-use tauri::{AppHandle, Emitter, Manager};
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use zip::ZipArchive;
@@ -26,6 +24,7 @@ const INDEX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const LIVE_INDEX_VERSION: u8 = 4;
 const REALTIME_CACHE_SECONDS: i64 = 25;
 const APP_USER_AGENT: &str = "DienstenLezer/1.0 (lokale Qbuzz-omloopweergave)";
+const VEHICLE_STATUS_STOPPED_AT: i32 = 1;
 const VEHICLE_STATUS_IN_TRANSIT_TO: i32 = 2;
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +50,7 @@ pub struct LiveMovementStatus {
     handover_delay_seconds: Option<i32>,
     handover_expected_at: Option<i64>,
     handover_departure_expected_at: Option<i64>,
+    handover_arrived: Option<bool>,
     handover_departed: Option<bool>,
     handover_stop_specific: Option<bool>,
     handover_planned_time: Option<String>,
@@ -261,35 +261,6 @@ struct CachedRealtimeFeeds {
     vehicle_positions: HashMap<String, VehicleRealtimePosition>,
 }
 
-#[cfg(feature = "desktop")]
-#[tauri::command]
-pub async fn get_qbuzz_live_statuses(
-    app: AppHandle,
-    date: String,
-    movements: Vec<LiveMovementRequest>,
-) -> Result<LiveStatusResponse, String> {
-    let app_data_directory = app
-        .path()
-        .app_data_dir()
-        .map_err(|error| format!("Lokale app-map kon niet worden bepaald: {error}"))?;
-    let roaming_directory = app_data_directory
-        .parent()
-        .ok_or_else(|| "Lokale app-map heeft geen bovenliggende map.".to_owned())?;
-    let cache_directory = roaming_directory.join("DienstenLezer").join("qbuzz-live");
-    std::fs::create_dir_all(&cache_directory)
-        .map_err(|error| format!("Lokale Qbuzz-map kon niet worden gemaakt: {error}"))?;
-    let archive_path = cache_directory.join("gtfs-nl.zip");
-    if !archive_path.is_file() {
-        migrate_legacy_archive(roaming_directory, &archive_path)?;
-    }
-    let app_for_progress = app.clone();
-    let runtime = LiveRuntime::new(cache_directory)?
-        .with_progress_handler(Arc::new(move |progress| {
-            let _ = app_for_progress.emit("qbuzz-sync-progress", progress);
-        }));
-    get_live_statuses(&runtime, date, movements).await
-}
-
 pub async fn get_live_statuses(
     runtime: &LiveRuntime,
     date: String,
@@ -326,9 +297,9 @@ pub async fn get_live_statuses(
             }
         };
         let update = trip.and_then(|candidate| {
-                updates
-                    .get(&candidate.realtime_trip_id)
-                    .or_else(|| updates.get(&candidate.trip_id))
+            updates
+                .get(&candidate.realtime_trip_id)
+                .or_else(|| updates.get(&candidate.trip_id))
         });
         if update.is_some() {
             diagnostics.realtime_updates += 1;
@@ -346,21 +317,20 @@ pub async fn get_live_statuses(
         if vehicle_id.is_some() {
             diagnostics.vehicle_updates += 1;
         }
-        let handover_prediction = trip.and_then(|candidate| {
-            update.and_then(|value| handover_prediction(value, candidate))
-        });
+        let handover_prediction = trip
+            .and_then(|candidate| update.and_then(|value| handover_prediction(value, candidate)));
         let handover_delay_seconds = handover_prediction
             .as_ref()
             .and_then(|prediction| stop_arrival_delay(prediction))
             .or_else(|| update.and_then(|value| instantaneous_delay(value, vehicle_position)));
-        let arrival_prediction = trip.and_then(|candidate| {
-            update.and_then(|value| arrival_prediction(value, candidate))
-        });
+        let arrival_prediction = trip
+            .and_then(|candidate| update.and_then(|value| arrival_prediction(value, candidate)));
         let arrival_delay_seconds = arrival_prediction
             .as_ref()
             .and_then(|prediction| stop_arrival_delay(prediction))
             .or_else(|| update.and_then(|value| instantaneous_delay(value, vehicle_position)));
-        let current_delay_seconds = update.and_then(|value| instantaneous_delay(value, vehicle_position));
+        let current_delay_seconds =
+            update.and_then(|value| instantaneous_delay(value, vehicle_position));
         if current_delay_seconds.is_some() {
             diagnostics.delay_updates += 1;
         }
@@ -370,17 +340,26 @@ pub async fn get_live_statuses(
             matched: trip.is_some(),
             delay_seconds: current_delay_seconds,
             handover_delay_seconds,
-            handover_expected_at: handover_prediction.as_ref().and_then(|prediction| stop_arrival_expected_at(prediction)),
-            handover_departure_expected_at: handover_prediction.as_ref().and_then(|prediction| stop_departure_expected_at(prediction)),
+            handover_expected_at: handover_prediction
+                .as_ref()
+                .and_then(|prediction| stop_arrival_expected_at(prediction)),
+            handover_departure_expected_at: handover_prediction
+                .as_ref()
+                .and_then(|prediction| stop_departure_expected_at(prediction)),
+            handover_arrived: trip.and_then(|candidate| {
+                handover_arrived(vehicle_position, candidate.first_stop_sequence)
+            }),
             handover_departed: trip.and_then(|candidate| {
-                vehicle_position
-                    .and_then(|position| position.current_stop_sequence)
-                    .map(|sequence| sequence > candidate.first_stop_sequence)
+                handover_departed(vehicle_position, candidate.first_stop_sequence)
             }),
             handover_stop_specific: handover_prediction.as_ref().map(|_| true),
-            handover_planned_time: trip.map(|value| value.handover_arrival.clone()).filter(|value| !value.is_empty()),
+            handover_planned_time: trip
+                .map(|value| value.handover_arrival.clone())
+                .filter(|value| !value.is_empty()),
             arrival_delay_seconds,
-            arrival_expected_at: arrival_prediction.as_ref().and_then(|prediction| stop_arrival_expected_at(prediction)),
+            arrival_expected_at: arrival_prediction
+                .as_ref()
+                .and_then(|prediction| stop_arrival_expected_at(prediction)),
             arrival_stop_specific: arrival_prediction.as_ref().map(|_| true),
             trip_id: trip.map(|value| value.trip_id.clone()),
             vehicle_id,
@@ -398,7 +377,10 @@ pub async fn get_live_statuses(
         statuses,
         sync: LiveSyncState {
             state: "ready".to_owned(),
-            message: format!("Qbuzz live: {} ritten gekoppeld, realtime elke 30 seconden ververst.", diagnostics.matched),
+            message: format!(
+                "Qbuzz live: {} ritten gekoppeld, realtime elke 30 seconden ververst.",
+                diagnostics.matched
+            ),
             indexed_at: Some(index.indexed_at),
             fetched_at: Some(realtime.fetched_at),
         },
@@ -406,7 +388,10 @@ pub async fn get_live_statuses(
     })
 }
 
-fn handover_prediction<'a>(update: &'a RealtimeUpdate, trip: &QbuzzTrip) -> Option<&'a RealtimeStopPrediction> {
+fn handover_prediction<'a>(
+    update: &'a RealtimeUpdate,
+    trip: &QbuzzTrip,
+) -> Option<&'a RealtimeStopPrediction> {
     // Een groot station kan in de feed twee opeenvolgende stopregels krijgen:
     // eerst aankomst en daarna vertrek. Voor een overname hoort altijd de
     // eerste passage van de halte bij de laagste stopvolgorde te winnen.
@@ -418,12 +403,17 @@ fn handover_prediction<'a>(update: &'a RealtimeUpdate, trip: &QbuzzTrip) -> Opti
             update
                 .stop_predictions
                 .iter()
-                .filter(|prediction| !trip.from_stop_id.is_empty() && prediction.stop_id == trip.from_stop_id)
+                .filter(|prediction| {
+                    !trip.from_stop_id.is_empty() && prediction.stop_id == trip.from_stop_id
+                })
                 .min_by_key(|prediction| prediction.stop_sequence.unwrap_or(u32::MAX))
         })
 }
 
-fn arrival_prediction<'a>(update: &'a RealtimeUpdate, trip: &QbuzzTrip) -> Option<&'a RealtimeStopPrediction> {
+fn arrival_prediction<'a>(
+    update: &'a RealtimeUpdate,
+    trip: &QbuzzTrip,
+) -> Option<&'a RealtimeStopPrediction> {
     // Een halte kan binnen dezelfde rit meerdere keren voorkomen. Valt de
     // exacte stopvolgorde tijdelijk uit de realtime-feed, kies dan niet op
     // alleen halte-id: dat kan de (latere) eindhalte van de rit opleveren.
@@ -435,40 +425,55 @@ fn arrival_prediction<'a>(update: &'a RealtimeUpdate, trip: &QbuzzTrip) -> Optio
 }
 
 fn stop_departure_delay(prediction: &RealtimeStopPrediction) -> Option<i32> {
-    prediction.departure_delay_seconds.or(prediction.arrival_delay_seconds)
+    prediction
+        .departure_delay_seconds
+        .or(prediction.arrival_delay_seconds)
 }
 
 fn stop_departure_expected_at(prediction: &RealtimeStopPrediction) -> Option<i64> {
-    prediction.departure_expected_at.or(prediction.arrival_expected_at)
+    prediction
+        .departure_expected_at
+        .or(prediction.arrival_expected_at)
 }
 
 fn stop_arrival_delay(prediction: &RealtimeStopPrediction) -> Option<i32> {
-    prediction.arrival_delay_seconds.or(prediction.departure_delay_seconds)
+    prediction
+        .arrival_delay_seconds
+        .or(prediction.departure_delay_seconds)
 }
 
 fn stop_arrival_expected_at(prediction: &RealtimeStopPrediction) -> Option<i64> {
-    prediction.arrival_expected_at.or(prediction.departure_expected_at)
+    prediction
+        .arrival_expected_at
+        .or(prediction.departure_expected_at)
 }
 
-fn instantaneous_delay(update: &RealtimeUpdate, position: Option<&VehicleRealtimePosition>) -> Option<i32> {
+fn instantaneous_delay(
+    update: &RealtimeUpdate,
+    position: Option<&VehicleRealtimePosition>,
+) -> Option<i32> {
     if let Some(position) = position {
         if let Some(sequence) = position.current_stop_sequence {
             // GTFS-RT treats a missing status as IN_TRANSIT_TO. In that state
             // the sequence identifies the next stop, so use the preceding
             // stop's observed delay for the bus's current timeline position.
-            let reference_sequence = if position.current_status.unwrap_or(VEHICLE_STATUS_IN_TRANSIT_TO) == VEHICLE_STATUS_IN_TRANSIT_TO {
+            let reference_sequence = if position
+                .current_status
+                .unwrap_or(VEHICLE_STATUS_IN_TRANSIT_TO)
+                == VEHICLE_STATUS_IN_TRANSIT_TO
+            {
                 sequence.saturating_sub(1)
             } else {
                 sequence
             };
-        if let Some(delay) = update
-            .stop_predictions
-            .iter()
-            .filter(|prediction| prediction.stop_sequence == Some(reference_sequence))
-            .find_map(stop_departure_delay)
-        {
-            return Some(delay);
-        }
+            if let Some(delay) = update
+                .stop_predictions
+                .iter()
+                .filter(|prediction| prediction.stop_sequence == Some(reference_sequence))
+                .find_map(stop_departure_delay)
+            {
+                return Some(delay);
+            }
         }
     }
 
@@ -477,10 +482,40 @@ fn instantaneous_delay(update: &RealtimeUpdate, position: Option<&VehicleRealtim
         update
             .stop_predictions
             .iter()
-            .filter(|prediction| stop_departure_expected_at(prediction).is_some_and(|value| value >= now))
+            .filter(|prediction| {
+                stop_departure_expected_at(prediction).is_some_and(|value| value >= now)
+            })
             .find_map(stop_departure_delay)
-            .or_else(|| update.stop_predictions.iter().rev().find_map(stop_departure_delay))
+            .or_else(|| {
+                update
+                    .stop_predictions
+                    .iter()
+                    .rev()
+                    .find_map(stop_departure_delay)
+            })
     })
+}
+
+fn handover_arrived(
+    position: Option<&VehicleRealtimePosition>,
+    handover_sequence: u32,
+) -> Option<bool> {
+    position.and_then(|position| {
+        position.current_stop_sequence.map(|sequence| {
+            sequence > handover_sequence
+                || sequence == handover_sequence
+                    && position.current_status == Some(VEHICLE_STATUS_STOPPED_AT)
+        })
+    })
+}
+
+fn handover_departed(
+    position: Option<&VehicleRealtimePosition>,
+    handover_sequence: u32,
+) -> Option<bool> {
+    position
+        .and_then(|position| position.current_stop_sequence)
+        .map(|sequence| sequence > handover_sequence)
 }
 
 async fn fetch_realtime_feed(url: &str, label: &str) -> Result<Vec<u8>, String> {
@@ -532,7 +567,9 @@ async fn realtime_feeds(runtime: &LiveRuntime) -> Result<Arc<CachedRealtimeFeeds
 async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveIndex>, String> {
     let mut memory_cache = runtime.index_cache.lock().await;
     if let Some(index) = memory_cache.as_ref() {
-        if index.version >= LIVE_INDEX_VERSION && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS {
+        if index.version >= LIVE_INDEX_VERSION
+            && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS
+        {
             return Ok(Arc::clone(index));
         }
     }
@@ -540,7 +577,9 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     let (index_path, archive_path) = runtime.cache_paths();
 
     if let Ok(index) = read_index(&index_path) {
-        if index.version >= LIVE_INDEX_VERSION && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS {
+        if index.version >= LIVE_INDEX_VERSION
+            && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS
+        {
             let index = Arc::new(index);
             *memory_cache = Some(Arc::clone(&index));
             return Ok(index);
@@ -548,15 +587,24 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     }
 
     if archive_path.is_file() {
-        runtime.report_progress("syncing", "Bestaande Qbuzz-dienstregeling lokaal indexeren...", None);
+        runtime.report_progress(
+            "syncing",
+            "Bestaande Qbuzz-dienstregeling lokaal indexeren...",
+            None,
+        );
         let archive_for_index = archive_path.clone();
-        let index = tokio::task::spawn_blocking(move || build_qbuzz_index(&archive_for_index, String::new()))
-            .await
-            .map_err(|error| format!("Qbuzz-index taak is afgebroken: {error}"))??;
+        let index = tokio::task::spawn_blocking(move || {
+            build_qbuzz_index(&archive_for_index, String::new())
+        })
+        .await
+        .map_err(|error| format!("Qbuzz-index taak is afgebroken: {error}"))??;
         write_index(&index_path, &index)?;
         runtime.report_progress(
             "ready",
-            &format!("Qbuzz-index gereed: {} ritten lokaal beschikbaar.", index.trips.len()),
+            &format!(
+                "Qbuzz-index gereed: {} ritten lokaal beschikbaar.",
+                index.trips.len()
+            ),
             Some(index.indexed_at),
         );
         let index = Arc::new(index);
@@ -569,13 +617,17 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     runtime.report_progress("syncing", "Qbuzz-dienstregeling wordt geindexeerd...", None);
 
     let archive_for_index = archive_path.clone();
-    let index = tokio::task::spawn_blocking(move || build_qbuzz_index(&archive_for_index, String::new()))
-        .await
-        .map_err(|error| format!("Qbuzz-index taak is afgebroken: {error}"))??;
+    let index =
+        tokio::task::spawn_blocking(move || build_qbuzz_index(&archive_for_index, String::new()))
+            .await
+            .map_err(|error| format!("Qbuzz-index taak is afgebroken: {error}"))??;
     write_index(&index_path, &index)?;
     runtime.report_progress(
         "ready",
-        &format!("Qbuzz-index gereed: {} ritten lokaal beschikbaar.", index.trips.len()),
+        &format!(
+            "Qbuzz-index gereed: {} ritten lokaal beschikbaar.",
+            index.trips.len()
+        ),
         Some(index.indexed_at),
     );
 
@@ -584,27 +636,13 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     Ok(index)
 }
 
-#[cfg(feature = "desktop")]
-fn migrate_legacy_archive(roaming_directory: &Path, destination: &Path) -> Result<(), String> {
-    for legacy_app_id in ["nl.dienstenlezer.desktop", "nl.dienstenlezer.app"] {
-        let source = roaming_directory.join(legacy_app_id).join("qbuzz-live").join("gtfs-nl.zip");
-        if !source.is_file() {
-            continue;
-        }
-
-        if std::fs::hard_link(&source, destination).is_err() {
-            std::fs::copy(&source, destination)
-                .map_err(|error| format!("Bestaande GTFS-cache kon niet worden gemigreerd: {error}"))?;
-        }
-        break;
-    }
-
-    Ok(())
-}
-
 async fn download_gtfs(runtime: &LiveRuntime, destination: &Path) -> Result<(), String> {
     let source_url = current_gtfs_url().await?;
-    runtime.report_progress("syncing", "Actuele OVapi dagdienstregeling downloaden...", None);
+    runtime.report_progress(
+        "syncing",
+        "Actuele OVapi dagdienstregeling downloaden...",
+        None,
+    );
     let response = http_client()?
         .get(&source_url)
         .send()
@@ -648,8 +686,19 @@ async fn download_gtfs(runtime: &LiveRuntime, destination: &Path) -> Result<(), 
 
         if downloaded >= next_report {
             let message = total.map_or_else(
-                || format!("Qbuzz-dienstregeling downloaden: {} MB", downloaded / 1024 / 1024),
-                |size| format!("Qbuzz-dienstregeling downloaden: {} van {} MB", downloaded / 1024 / 1024, size / 1024 / 1024),
+                || {
+                    format!(
+                        "Qbuzz-dienstregeling downloaden: {} MB",
+                        downloaded / 1024 / 1024
+                    )
+                },
+                |size| {
+                    format!(
+                        "Qbuzz-dienstregeling downloaden: {} van {} MB",
+                        downloaded / 1024 / 1024,
+                        size / 1024 / 1024
+                    )
+                },
             );
             runtime.report_progress("syncing", &message, None);
             next_report += 10_u64 * 1024 * 1024;
@@ -690,7 +739,9 @@ fn dated_gtfs_filename(listing: &str) -> Option<&str> {
             value
                 .strip_prefix("NL-")
                 .and_then(|date| date.strip_suffix(".gtfs.zip"))
-                .is_some_and(|date| date.len() == 8 && date.chars().all(|character| character.is_ascii_digit()))
+                .is_some_and(|date| {
+                    date.len() == 8 && date.chars().all(|character| character.is_ascii_digit())
+                })
         })
         .max()
 }
@@ -713,19 +764,24 @@ fn format_wait_duration(seconds: u64) -> String {
 
 fn read_index(path: &Path) -> Result<LiveIndex, String> {
     let file = File::open(path).map_err(|error| error.to_string())?;
-    let mut index: LiveIndex = serde_json::from_reader(BufReader::new(file)).map_err(|error| error.to_string())?;
+    let mut index: LiveIndex =
+        serde_json::from_reader(BufReader::new(file)).map_err(|error| error.to_string())?;
     index.rebuild_trip_lookup();
     Ok(index)
 }
 
 fn write_index(path: &Path, index: &LiveIndex) -> Result<(), String> {
-    let contents = serde_json::to_vec(index).map_err(|error| format!("Qbuzz-index kon niet worden geschreven: {error}"))?;
-    std::fs::write(path, contents).map_err(|error| format!("Qbuzz-index kon niet lokaal worden opgeslagen: {error}"))
+    let contents = serde_json::to_vec(index)
+        .map_err(|error| format!("Qbuzz-index kon niet worden geschreven: {error}"))?;
+    std::fs::write(path, contents)
+        .map_err(|error| format!("Qbuzz-index kon niet lokaal worden opgeslagen: {error}"))
 }
 
 fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex, String> {
-    let file = File::open(path).map_err(|error| format!("GTFS-archief kon niet worden geopend: {error}"))?;
-    let mut archive = ZipArchive::new(file).map_err(|error| format!("GTFS-archief is ongeldig: {error}"))?;
+    let file = File::open(path)
+        .map_err(|error| format!("GTFS-archief kon niet worden geopend: {error}"))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| format!("GTFS-archief is ongeldig: {error}"))?;
     let qbuzz_agencies = read_qbuzz_agencies(&mut archive)?;
     let stops = read_stops(&mut archive)?;
     let routes = read_qbuzz_routes(&mut archive, &qbuzz_agencies)?;
@@ -775,7 +831,9 @@ fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex,
 }
 
 fn read_qbuzz_agencies(archive: &mut ZipArchive<File>) -> Result<HashSet<String>, String> {
-    let entry = archive.by_name("agency.txt").map_err(|error| format!("agency.txt ontbreekt: {error}"))?;
+    let entry = archive
+        .by_name("agency.txt")
+        .map_err(|error| format!("agency.txt ontbreekt: {error}"))?;
     let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(entry);
     let headers = reader.headers().map_err(csv_error)?.clone();
     let agency_id = column(&headers, "agency_id")?;
@@ -784,7 +842,12 @@ fn read_qbuzz_agencies(archive: &mut ZipArchive<File>) -> Result<HashSet<String>
 
     for record in reader.records() {
         let record = record.map_err(csv_error)?;
-        if record.get(agency_name).unwrap_or_default().to_lowercase().contains("qbuzz") {
+        if record
+            .get(agency_name)
+            .unwrap_or_default()
+            .to_lowercase()
+            .contains("qbuzz")
+        {
             agencies.insert(record.get(agency_id).unwrap_or_default().to_owned());
         }
     }
@@ -797,7 +860,9 @@ fn read_qbuzz_agencies(archive: &mut ZipArchive<File>) -> Result<HashSet<String>
 }
 
 fn read_stops(archive: &mut ZipArchive<File>) -> Result<HashMap<String, String>, String> {
-    let entry = archive.by_name("stops.txt").map_err(|error| format!("stops.txt ontbreekt: {error}"))?;
+    let entry = archive
+        .by_name("stops.txt")
+        .map_err(|error| format!("stops.txt ontbreekt: {error}"))?;
     let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(entry);
     let headers = reader.headers().map_err(csv_error)?.clone();
     let stop_id = column(&headers, "stop_id")?;
@@ -815,8 +880,13 @@ fn read_stops(archive: &mut ZipArchive<File>) -> Result<HashMap<String, String>,
     Ok(stops)
 }
 
-fn read_qbuzz_routes(archive: &mut ZipArchive<File>, agencies: &HashSet<String>) -> Result<HashMap<String, String>, String> {
-    let entry = archive.by_name("routes.txt").map_err(|error| format!("routes.txt ontbreekt: {error}"))?;
+fn read_qbuzz_routes(
+    archive: &mut ZipArchive<File>,
+    agencies: &HashSet<String>,
+) -> Result<HashMap<String, String>, String> {
+    let entry = archive
+        .by_name("routes.txt")
+        .map_err(|error| format!("routes.txt ontbreekt: {error}"))?;
     let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(entry);
     let headers = reader.headers().map_err(csv_error)?.clone();
     let route_id = column(&headers, "route_id")?;
@@ -837,8 +907,13 @@ fn read_qbuzz_routes(archive: &mut ZipArchive<File>, agencies: &HashSet<String>)
     Ok(routes)
 }
 
-fn read_qbuzz_trips(archive: &mut ZipArchive<File>, routes: &HashMap<String, String>) -> Result<HashMap<String, TripSeed>, String> {
-    let entry = archive.by_name("trips.txt").map_err(|error| format!("trips.txt ontbreekt: {error}"))?;
+fn read_qbuzz_trips(
+    archive: &mut ZipArchive<File>,
+    routes: &HashMap<String, String>,
+) -> Result<HashMap<String, TripSeed>, String> {
+    let entry = archive
+        .by_name("trips.txt")
+        .map_err(|error| format!("trips.txt ontbreekt: {error}"))?;
     let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(entry);
     let headers = reader.headers().map_err(csv_error)?.clone();
     let route_id = column(&headers, "route_id")?;
@@ -854,8 +929,12 @@ fn read_qbuzz_trips(archive: &mut ZipArchive<File>, routes: &HashMap<String, Str
             continue;
         };
         let identifier = record.get(trip_id).unwrap_or_default().to_owned();
-        let realtime = optional_value(&record, realtime_trip_id).unwrap_or(&identifier).to_owned();
-        let trip_number = optional_value(&record, trip_short_name).unwrap_or_default().to_owned();
+        let realtime = optional_value(&record, realtime_trip_id)
+            .unwrap_or(&identifier)
+            .to_owned();
+        let trip_number = optional_value(&record, trip_short_name)
+            .unwrap_or_default()
+            .to_owned();
         trips.insert(
             identifier.clone(),
             TripSeed {
@@ -871,8 +950,13 @@ fn read_qbuzz_trips(archive: &mut ZipArchive<File>, routes: &HashMap<String, Str
     Ok(trips)
 }
 
-fn read_trip_bounds(archive: &mut ZipArchive<File>, trips: &HashMap<String, TripSeed>) -> Result<HashMap<String, TripBounds>, String> {
-    let entry = archive.by_name("stop_times.txt").map_err(|error| format!("stop_times.txt ontbreekt: {error}"))?;
+fn read_trip_bounds(
+    archive: &mut ZipArchive<File>,
+    trips: &HashMap<String, TripSeed>,
+) -> Result<HashMap<String, TripBounds>, String> {
+    let entry = archive
+        .by_name("stop_times.txt")
+        .map_err(|error| format!("stop_times.txt ontbreekt: {error}"))?;
     let mut reader = csv::ReaderBuilder::new().flexible(true).from_reader(entry);
     let headers = reader.headers().map_err(csv_error)?.clone();
     let trip_id = column(&headers, "trip_id")?;
@@ -889,11 +973,17 @@ fn read_trip_bounds(archive: &mut ZipArchive<File>, trips: &HashMap<String, Trip
             continue;
         }
 
-        let sequence = record.get(stop_sequence).unwrap_or_default().parse::<u32>().unwrap_or_default();
+        let sequence = record
+            .get(stop_sequence)
+            .unwrap_or_default()
+            .parse::<u32>()
+            .unwrap_or_default();
         let stop = record.get(stop_id).unwrap_or_default().to_owned();
         let departure = record.get(departure_time).unwrap_or_default().to_owned();
         let arrival = record.get(arrival_time).unwrap_or_default().to_owned();
-        let bound = bounds.entry(identifier.to_owned()).or_insert_with(TripBounds::default);
+        let bound = bounds
+            .entry(identifier.to_owned())
+            .or_insert_with(TripBounds::default);
 
         if sequence < bound.first_sequence {
             bound.first_sequence = sequence;
@@ -920,10 +1010,18 @@ fn read_calendar(archive: &mut ZipArchive<File>) -> Result<HashMap<String, Calen
     let service_id = column(&headers, "service_id")?;
     let start_date = column(&headers, "start_date")?;
     let end_date = column(&headers, "end_date")?;
-    let days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-        .map(|name| column(&headers, name))
-        .into_iter()
-        .collect::<Result<Vec<_>, _>>()?;
+    let days = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ]
+    .map(|name| column(&headers, name))
+    .into_iter()
+    .collect::<Result<Vec<_>, _>>()?;
     let mut calendar = HashMap::new();
 
     for record in reader.records() {
@@ -945,7 +1043,9 @@ fn read_calendar(archive: &mut ZipArchive<File>) -> Result<HashMap<String, Calen
     Ok(calendar)
 }
 
-fn read_calendar_exceptions(archive: &mut ZipArchive<File>) -> Result<HashMap<String, HashMap<String, i32>>, String> {
+fn read_calendar_exceptions(
+    archive: &mut ZipArchive<File>,
+) -> Result<HashMap<String, HashMap<String, i32>>, String> {
     let Ok(entry) = archive.by_name("calendar_dates.txt") else {
         return Ok(HashMap::new());
     };
@@ -963,7 +1063,11 @@ fn read_calendar_exceptions(archive: &mut ZipArchive<File>) -> Result<HashMap<St
             .or_default()
             .insert(
                 record.get(date).unwrap_or_default().to_owned(),
-                record.get(exception_type).unwrap_or_default().parse().unwrap_or_default(),
+                record
+                    .get(exception_type)
+                    .unwrap_or_default()
+                    .parse()
+                    .unwrap_or_default(),
             );
     }
 
@@ -978,14 +1082,22 @@ enum MatchAttempt<'a> {
 }
 
 #[cfg(test)]
-fn match_trip<'a>(index: &'a LiveIndex, movement: &LiveMovementRequest, date: &str) -> Option<&'a QbuzzTrip> {
+fn match_trip<'a>(
+    index: &'a LiveIndex,
+    movement: &LiveMovementRequest,
+    date: &str,
+) -> Option<&'a QbuzzTrip> {
     match match_attempt(index, movement, date) {
         MatchAttempt::Matched(trip) => Some(trip),
         MatchAttempt::NoLineOrTrip | MatchAttempt::NoMatchingTime | MatchAttempt::Ambiguous => None,
     }
 }
 
-fn match_attempt<'a>(index: &'a LiveIndex, movement: &LiveMovementRequest, date: &str) -> MatchAttempt<'a> {
+fn match_attempt<'a>(
+    index: &'a LiveIndex,
+    movement: &LiveMovementRequest,
+    date: &str,
+) -> MatchAttempt<'a> {
     let Some(line_number) = movement.line_number.as_deref() else {
         return MatchAttempt::NoLineOrTrip;
     };
@@ -1029,8 +1141,10 @@ fn match_attempt<'a>(index: &'a LiveIndex, movement: &LiveMovementRequest, date:
         .iter()
         .copied()
         .filter(|trip| {
-            time_difference_minutes(&trip.departure, &movement.departure).is_some_and(|difference| difference <= 2)
-                && time_difference_minutes(&trip.arrival, &movement.arrival).is_some_and(|difference| difference <= 2)
+            time_difference_minutes(&trip.departure, &movement.departure)
+                .is_some_and(|difference| difference <= 2)
+                && time_difference_minutes(&trip.arrival, &movement.arrival)
+                    .is_some_and(|difference| difference <= 2)
         })
         .collect::<Vec<_>>();
 
@@ -1047,7 +1161,10 @@ enum CandidateResolution<'a> {
     Ambiguous,
 }
 
-fn unique_candidate<'a>(candidates: Vec<&'a QbuzzTrip>, movement: &LiveMovementRequest) -> CandidateResolution<'a> {
+fn unique_candidate<'a>(
+    candidates: Vec<&'a QbuzzTrip>,
+    movement: &LiveMovementRequest,
+) -> CandidateResolution<'a> {
     if candidates.len() == 1 {
         return CandidateResolution::Matched(candidates[0]);
     }
@@ -1057,7 +1174,9 @@ fn unique_candidate<'a>(candidates: Vec<&'a QbuzzTrip>, movement: &LiveMovementR
 
     let exact_stop_matches = candidates
         .into_iter()
-        .filter(|trip| stop_matches(&trip.from, &movement.from) && stop_matches(&trip.to, &movement.to))
+        .filter(|trip| {
+            stop_matches(&trip.from, &movement.from) && stop_matches(&trip.to, &movement.to)
+        })
         .collect::<Vec<_>>();
 
     if exact_stop_matches.len() == 1 {
@@ -1079,7 +1198,11 @@ fn time_difference_minutes(first: &str, second: &str) -> Option<u32> {
 }
 
 fn runs_on(index: &LiveIndex, trip: &QbuzzTrip, date: &str) -> bool {
-    if let Some(exception) = index.calendar_exceptions.get(&trip.service_id).and_then(|dates| dates.get(date)) {
+    if let Some(exception) = index
+        .calendar_exceptions
+        .get(&trip.service_id)
+        .and_then(|dates| dates.get(date))
+    {
         return *exception == 1;
     }
     // Sommige Nederlandse GTFS-feeds gebruiken alleen calendar_dates.txt.
@@ -1101,8 +1224,12 @@ fn runs_on(index: &LiveIndex, trip: &QbuzzTrip, date: &str) -> bool {
 }
 
 fn decode_trip_updates(bytes: &[u8]) -> Result<HashMap<String, RealtimeUpdate>, String> {
-    let feed = FeedMessage::decode(bytes).map_err(|error| format!("Qbuzz realtime-feed is ongeldig: {error}"))?;
-    let feed_timestamp = feed.header.and_then(|header| header.timestamp).map(|value| value as i64);
+    let feed = FeedMessage::decode(bytes)
+        .map_err(|error| format!("Qbuzz realtime-feed is ongeldig: {error}"))?;
+    let feed_timestamp = feed
+        .header
+        .and_then(|header| header.timestamp)
+        .map(|value| value as i64);
     let mut updates = HashMap::new();
 
     for entity in feed.entity {
@@ -1141,7 +1268,10 @@ fn decode_trip_updates(bytes: &[u8]) -> Result<HashMap<String, RealtimeUpdate>, 
             RealtimeUpdate {
                 delay_seconds,
                 vehicle_id,
-                updated_at: update.timestamp.map(|value| value as i64).or(feed_timestamp),
+                updated_at: update
+                    .timestamp
+                    .map(|value| value as i64)
+                    .or(feed_timestamp),
                 stop_predictions,
             },
         );
@@ -1150,8 +1280,11 @@ fn decode_trip_updates(bytes: &[u8]) -> Result<HashMap<String, RealtimeUpdate>, 
     Ok(updates)
 }
 
-fn decode_vehicle_positions(bytes: &[u8]) -> Result<HashMap<String, VehicleRealtimePosition>, String> {
-    let feed = VehicleFeedMessage::decode(bytes).map_err(|error| format!("Qbuzz voertuigposities zijn ongeldig: {error}"))?;
+fn decode_vehicle_positions(
+    bytes: &[u8],
+) -> Result<HashMap<String, VehicleRealtimePosition>, String> {
+    let feed = VehicleFeedMessage::decode(bytes)
+        .map_err(|error| format!("Qbuzz voertuigposities zijn ongeldig: {error}"))?;
     let mut vehicles = HashMap::new();
 
     for entity in feed.entity {
@@ -1191,7 +1324,11 @@ fn vehicle_identifier(vehicle: &VehicleDescriptor) -> Option<String> {
 
 fn normalise_line(value: &str) -> String {
     let compact = normalise_text(value);
-    compact.strip_prefix('L').filter(|rest| rest.chars().all(|character| character.is_ascii_digit())).unwrap_or(&compact).to_owned()
+    compact
+        .strip_prefix('L')
+        .filter(|rest| rest.chars().all(|character| character.is_ascii_digit()))
+        .unwrap_or(&compact)
+        .to_owned()
 }
 
 fn trip_lookup_key(line: &str, trip_number: &str) -> String {
@@ -1199,13 +1336,21 @@ fn trip_lookup_key(line: &str, trip_number: &str) -> String {
 }
 
 fn normalise_text(value: &str) -> String {
-    value.chars().filter(|character| character.is_ascii_alphanumeric()).collect::<String>().to_uppercase()
+    value
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric())
+        .collect::<String>()
+        .to_uppercase()
 }
 
 fn stop_matches(static_stop: &str, pdf_stop: &str) -> bool {
     let static_stop = normalise_text(static_stop);
     let pdf_stop = normalise_text(pdf_stop);
-    !static_stop.is_empty() && !pdf_stop.is_empty() && (static_stop == pdf_stop || static_stop.contains(&pdf_stop) || pdf_stop.contains(&static_stop))
+    !static_stop.is_empty()
+        && !pdf_stop.is_empty()
+        && (static_stop == pdf_stop
+            || static_stop.contains(&pdf_stop)
+            || pdf_stop.contains(&static_stop))
 }
 
 fn time_hhmm(value: &str) -> String {
@@ -1220,7 +1365,10 @@ fn time_hhmm(value: &str) -> String {
 }
 
 fn column(headers: &csv::StringRecord, name: &str) -> Result<usize, String> {
-    headers.iter().position(|header| header == name).ok_or_else(|| format!("GTFS-kolom {name} ontbreekt."))
+    headers
+        .iter()
+        .position(|header| header == name)
+        .ok_or_else(|| format!("GTFS-kolom {name} ontbreekt."))
 }
 
 fn optional_column(headers: &csv::StringRecord, name: &str) -> Option<usize> {
@@ -1228,7 +1376,9 @@ fn optional_column(headers: &csv::StringRecord, name: &str) -> Option<usize> {
 }
 
 fn optional_value(record: &csv::StringRecord, column: Option<usize>) -> Option<&str> {
-    column.and_then(|index| record.get(index)).filter(|value| !value.is_empty())
+    column
+        .and_then(|index| record.get(index))
+        .filter(|value| !value.is_empty())
 }
 
 fn csv_error(error: csv::Error) -> String {
@@ -1236,7 +1386,10 @@ fn csv_error(error: csv::Error) -> String {
 }
 
 fn now_timestamp() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 #[cfg(test)]
@@ -1296,7 +1449,10 @@ mod tests {
             last_stop_sequence: 99,
         });
 
-        assert_eq!(match_trip(&index, &request(), "2026-07-11").map(|trip| trip.trip_id.as_str()), Some("trip-1"));
+        assert_eq!(
+            match_trip(&index, &request(), "2026-07-11").map(|trip| trip.trip_id.as_str()),
+            Some("trip-1")
+        );
     }
 
     #[test]
@@ -1321,7 +1477,10 @@ mod tests {
         pdf_request.departure = "07:01".to_owned();
         pdf_request.arrival = "07:37".to_owned();
 
-        assert_eq!(match_trip(&index, &pdf_request, "2026-07-11").map(|trip| trip.trip_id.as_str()), Some("trip-1"));
+        assert_eq!(
+            match_trip(&index, &pdf_request, "2026-07-11").map(|trip| trip.trip_id.as_str()),
+            Some("trip-1")
+        );
     }
 
     #[test]
@@ -1371,7 +1530,8 @@ mod tests {
 
     #[test]
     fn finds_latest_dated_gtfs_file() {
-        let listing = r#"<a href="NL-20260710.gtfs.zip">oud</a><a href="NL-20260711.gtfs.zip">nieuw</a>"#;
+        let listing =
+            r#"<a href="NL-20260710.gtfs.zip">oud</a><a href="NL-20260711.gtfs.zip">nieuw</a>"#;
         assert_eq!(dated_gtfs_filename(listing), Some("NL-20260711.gtfs.zip"));
     }
 
@@ -1410,10 +1570,15 @@ mod tests {
         let bytes = VehicleFeedMessage {
             entity: vec![VehicleFeedEntity {
                 vehicle: Some(VehiclePosition {
-                    trip: Some(TripDescriptor { trip_id: "QBUZZ:z3:1001".to_owned() }),
+                    trip: Some(TripDescriptor {
+                        trip_id: "QBUZZ:z3:1001".to_owned(),
+                    }),
                     current_stop_sequence: Some(4),
                     current_status: Some(1),
-                    vehicle: Some(VehicleDescriptor { id: String::new(), label: "1234".to_owned() }),
+                    vehicle: Some(VehicleDescriptor {
+                        id: String::new(),
+                        label: "1234".to_owned(),
+                    }),
                 }),
             }],
         }
@@ -1432,18 +1597,35 @@ mod tests {
             header: None,
             entity: vec![FeedEntity {
                 trip_update: Some(TripUpdate {
-                    trip: Some(TripDescriptor { trip_id: "trip-1".to_owned() }),
-                    stop_time_update: vec![StopTimeUpdate {
-                        stop_sequence: Some(1),
-                        arrival: Some(StopTimeEvent { delay: Some(120), time: Some(1_784_000_120) }),
-                        departure: Some(StopTimeEvent { delay: Some(300), time: Some(1_784_000_300) }),
-                        stop_id: "stop-a".to_owned(),
-                    }, StopTimeUpdate {
-                        stop_sequence: Some(2),
-                        arrival: Some(StopTimeEvent { delay: Some(300), time: Some(1_784_000_300) }),
-                        departure: Some(StopTimeEvent { delay: Some(300), time: Some(1_784_000_300) }),
-                        stop_id: "stop-a".to_owned(),
-                    }],
+                    trip: Some(TripDescriptor {
+                        trip_id: "trip-1".to_owned(),
+                    }),
+                    stop_time_update: vec![
+                        StopTimeUpdate {
+                            stop_sequence: Some(1),
+                            arrival: Some(StopTimeEvent {
+                                delay: Some(120),
+                                time: Some(1_784_000_120),
+                            }),
+                            departure: Some(StopTimeEvent {
+                                delay: Some(300),
+                                time: Some(1_784_000_300),
+                            }),
+                            stop_id: "stop-a".to_owned(),
+                        },
+                        StopTimeUpdate {
+                            stop_sequence: Some(2),
+                            arrival: Some(StopTimeEvent {
+                                delay: Some(300),
+                                time: Some(1_784_000_300),
+                            }),
+                            departure: Some(StopTimeEvent {
+                                delay: Some(300),
+                                time: Some(1_784_000_300),
+                            }),
+                            stop_id: "stop-a".to_owned(),
+                        },
+                    ],
                     vehicle: None,
                     timestamp: None,
                     delay: Some(300),
@@ -1543,6 +1725,41 @@ mod tests {
         assert_eq!(instantaneous_delay(&update, Some(&position)), Some(0));
     }
 
+    #[test]
+    fn marks_a_vehicle_stopped_at_the_handover_stop_as_arrived() {
+        let position = VehicleRealtimePosition {
+            vehicle_id: "7147".to_owned(),
+            current_stop_sequence: Some(5),
+            current_status: Some(VEHICLE_STATUS_STOPPED_AT),
+        };
+
+        assert_eq!(handover_arrived(Some(&position), 5), Some(true));
+        assert_eq!(handover_departed(Some(&position), 5), Some(false));
+    }
+
+    #[test]
+    fn marks_a_vehicle_beyond_the_handover_stop_as_departed() {
+        let position = VehicleRealtimePosition {
+            vehicle_id: "7147".to_owned(),
+            current_stop_sequence: Some(6),
+            current_status: Some(VEHICLE_STATUS_IN_TRANSIT_TO),
+        };
+
+        assert_eq!(handover_arrived(Some(&position), 5), Some(true));
+        assert_eq!(handover_departed(Some(&position), 5), Some(true));
+    }
+
+    #[test]
+    fn keeps_an_incoming_vehicle_in_the_expected_phase() {
+        let position = VehicleRealtimePosition {
+            vehicle_id: "7147".to_owned(),
+            current_stop_sequence: Some(5),
+            current_status: Some(VEHICLE_STATUS_IN_TRANSIT_TO),
+        };
+
+        assert_eq!(handover_arrived(Some(&position), 5), Some(false));
+        assert_eq!(handover_departed(Some(&position), 5), Some(false));
+    }
 }
 
 #[derive(Clone, PartialEq, Message)]

@@ -1,4 +1,4 @@
-import type { LiveMovementRequest, LiveStatusResponse, LiveSyncState } from "./types";
+import type { LiveMovementRequest, LiveStatusResponse } from "./types";
 import { serverUrl } from "./serverUrl";
 
 const webLiveEtags = new Map<string, string>();
@@ -73,27 +73,12 @@ function retainKnownVehicleIds(date: string, divisionIds: string[], response: Li
   };
 }
 
-export function isDesktopLiveAvailable(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
-}
-
 export async function getQbuzzLiveStatuses(
   date: string,
-  movements: LiveMovementRequest[],
+  _movements: LiveMovementRequest[],
   divisionIds: string[] = [],
 ): Promise<LiveStatusResponse> {
   const scopeKey = liveScopeKey(date, divisionIds);
-  if (isDesktopLiveAvailable()) {
-    const { invoke } = await import("@tauri-apps/api/core");
-    const result = retainKnownVehicleIds(
-      date,
-      divisionIds,
-      await invoke<LiveStatusResponse>("get_qbuzz_live_statuses", { date, movements }),
-    );
-    storeCachedQbuzzLiveStatuses(date, divisionIds, result);
-    return result;
-  }
-
   const headers = new Headers();
   const knownEtag = webLiveEtags.get(scopeKey);
   if (knownEtag) {
@@ -140,15 +125,6 @@ export async function getQbuzzLiveStatuses(
 
 function liveScopeKey(date: string, divisionIds: string[]): string {
   return `${date}:${[...new Set(divisionIds)].sort().join(",")}`;
-}
-
-export async function listenToQbuzzSyncProgress(onProgress: (progress: LiveSyncState) => void): Promise<() => void> {
-  if (!isDesktopLiveAvailable()) {
-    return () => undefined;
-  }
-
-  const { listen } = await import("@tauri-apps/api/event");
-  return listen<LiveSyncState>("qbuzz-sync-progress", (event) => onProgress(event.payload));
 }
 
 export function plannedMarkerMinute(currentMinute: number, delaySeconds: number, startMinute: number, endMinute: number): number | undefined {

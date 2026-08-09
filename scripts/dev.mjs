@@ -5,7 +5,7 @@ const npmCommand = isWindows ? "npm.cmd" : "npm";
 const cargoCommand = isWindows ? "cargo.exe" : "cargo";
 const children = [
   spawn(npmCommand, ["run", "web:dev"], { stdio: "inherit", shell: isWindows }),
-  spawn(cargoCommand, ["run", "--manifest-path", "src-tauri/Cargo.toml", "--no-default-features", "--features", "server", "--bin", "dienstenlezer-server"], { stdio: "inherit" }),
+  spawn(cargoCommand, ["run", "--manifest-path", "src-tauri/Cargo.toml", "--bin", "dienstenlezer-server"], { stdio: "inherit" }),
 ];
 
 let closing = false;

@@ -1,6 +1,7 @@
 import * as pdfjsLib from "pdfjs-dist";
 import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
 import { detectMovementColumnLayout, isBuslessDriverRow, textInMovementColumn } from "./pdfColumns";
+import { extractMaterialType, isVehicleMovement, propagateMaterialByLoop } from "./materialType";
 import type { Dienst, Movement, MovementType, ParseResult, TextItem } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -59,7 +60,7 @@ async function parsePdfFile(file: File): Promise<ParseResult> {
     warnings.push(`${file.name}: kon pdf niet uitlezen (${message}).`);
   }
 
-  return { fileName: file.name, diensten, movements, warnings };
+  return { fileName: file.name, diensten, movements: propagateMaterialByLoop(movements), warnings };
 }
 
 function normaliseItems(items: PdfTextContentItem[]): TextItem[] {
@@ -131,6 +132,8 @@ function readMovements(sourceFile: string, pageNumber: number, rows: Row[], dien
   const columns = detectMovementColumnLayout(rows);
   const movements: Movement[] = [];
   let lastKnownOmloop: string | undefined;
+  let pendingMaterialType: string | undefined;
+  const materialByLoop = new Map<string, string>();
 
   for (const row of dataRows) {
     const readColumn = (key: keyof typeof columns.ranges) => textInMovementColumn(
@@ -140,12 +143,13 @@ function readMovements(sourceFile: string, pageNumber: number, rows: Row[], dien
     );
     const vertrek = readColumn("departure");
     const aankomst = readColumn("arrival");
+    const raw = row.items.map((item) => item.text).join(" ");
 
     if (!TIME_RE.test(vertrek) || !TIME_RE.test(aankomst)) {
+      pendingMaterialType = extractMaterialType(raw) ?? pendingMaterialType;
       continue;
     }
 
-    const raw = row.items.map((item) => item.text).join(" ");
     const buslessDriverAction = isBuslessDriverRow(raw);
     const lijnnummer = readColumn("line");
     const ritnummer = readColumn("trip");
@@ -154,6 +158,14 @@ function readMovements(sourceFile: string, pageNumber: number, rows: Row[], dien
     const van = readColumn("from");
     const naar = readColumn("to");
     const type = buslessDriverAction ? "dienst" : detectType(lijnnummer, ritnummer, omloopnummer, van, naar);
+
+    if (!buslessDriverAction && explicitOmloopnummer && pendingMaterialType) {
+      materialByLoop.set(explicitOmloopnummer, pendingMaterialType);
+      pendingMaterialType = undefined;
+    }
+    const materieelsoort = isVehicleMovement(type) && omloopnummer
+      ? materialByLoop.get(omloopnummer)
+      : undefined;
 
     if (buslessDriverAction) {
       lastKnownOmloop = undefined;
@@ -170,6 +182,7 @@ function readMovements(sourceFile: string, pageNumber: number, rows: Row[], dien
       omloopnummer: omloopnummer || undefined,
       lijnnummer: lijnnummer || undefined,
       ritnummer: ritnummer || undefined,
+      materieelsoort,
       vertrek,
       aankomst,
       van,
@@ -182,6 +195,9 @@ function readMovements(sourceFile: string, pageNumber: number, rows: Row[], dien
     // chauffeuracties mogen daarom niet meer de oude omloop erven.
     if (isBusReturnedToGarage(raw, van, naar)) {
       lastKnownOmloop = undefined;
+      if (omloopnummer) {
+        materialByLoop.delete(omloopnummer);
+      }
     }
   }
 

@@ -9,13 +9,13 @@ RUN npm run web:build
 
 FROM rust:1.88-bookworm AS server-build
 WORKDIR /build
-COPY src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/build.rs ./src-tauri/
+COPY src-tauri/Cargo.toml src-tauri/Cargo.lock ./src-tauri/
 RUN mkdir -p src-tauri/src/bin \
     && printf 'pub fn placeholder() {}\n' > src-tauri/src/lib.rs \
     && printf 'fn main() {}\n' > src-tauri/src/bin/dienstenlezer-server.rs \
-    && cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server
+    && cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin dienstenlezer-server
 COPY src-tauri/src ./src-tauri/src
-RUN cargo build --locked --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server
+RUN cargo build --locked --release --manifest-path src-tauri/Cargo.toml --bin dienstenlezer-server
 
 FROM debian:bookworm-slim
 ARG BUILD_VERSION=dev
@@ -30,6 +30,7 @@ COPY --from=web-build /build/dist /app/dist
 ENV DIENSTENLEZER_BIND=0.0.0.0:8080 \
     DIENSTENLEZER_DATA_DIR=/data \
     DIENSTENLEZER_WEB_DIR=/app/dist \
+    DIENSTENLEZER_SECURE_COOKIES=true \
     RUST_LOG=dienstenlezer=info,tower_http=info
 LABEL io.hass.type="app" \
     io.hass.version="${BUILD_VERSION}" \

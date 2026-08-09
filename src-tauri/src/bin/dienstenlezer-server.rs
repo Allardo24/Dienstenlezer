@@ -17,6 +17,10 @@ use axum::{
 };
 use chrono::{Datelike, Local, NaiveDate, Timelike};
 use dienstenlezer::live::{get_live_statuses, LiveMovementRequest, LiveRuntime};
+use dienstenlezer::personal::{self, PersonalStore};
+use dienstenlezer::personal_data::{
+    AchievementInput, DutySegmentSnapshot, DutySnapshot, PersonalDataStore,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -71,6 +75,8 @@ struct AppState {
     organization: Arc<RwLock<OrganizationConfig>>,
     settings_path: PathBuf,
     settings: Arc<RwLock<AdminSettings>>,
+    personal: PersonalStore,
+    personal_data: PersonalDataStore,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -163,6 +169,7 @@ struct StoredFilePatch {
     enabled: Option<bool>,
     day_segment: Option<String>,
     division_id: Option<String>,
+    parse_result: Option<Value>,
 }
 
 #[derive(Deserialize)]
@@ -198,6 +205,15 @@ struct StoredMovement {
     raw: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfirmDutyRequest {
+    operational_date: String,
+    source_file_id: String,
+    service_number: String,
+    origin: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()
@@ -216,6 +232,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let files_directory = data_directory.join("pdf-files");
     let organization_path = data_directory.join("organization.json");
     let settings_path = data_directory.join("settings.json");
+    let database_path = data_directory.join("dienstenlezer.sqlite3");
+    let secure_cookies = env::var("DIENSTENLEZER_SECURE_COOKIES")
+        .map(|value| matches!(value.as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false);
+    let personal = PersonalStore::open(&database_path, secure_cookies)?;
+    let personal_data = PersonalDataStore::open(&database_path)?;
     tokio::fs::create_dir_all(&files_directory).await?;
     let mut records = read_records(&files_directory).await?;
     let mut organization = read_organization(&organization_path).await?;
@@ -235,6 +257,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         organization: Arc::new(RwLock::new(organization)),
         settings_path,
         settings: Arc::new(RwLock::new(settings)),
+        personal: personal.clone(),
+        personal_data,
     };
     let index_file = web_directory.join("index.html");
     if !index_file.is_file() {
@@ -254,16 +278,46 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/settings", put(update_admin_settings))
         .route("/api/files", post(upload_file))
         .route("/api/files/check", post(check_files))
+        .route("/api/me/duties", get(list_my_duties).post(confirm_my_duty))
+        .route("/api/me/duties/export", get(export_my_duties))
+        .route("/api/me/duties/{id}", axum::routing::delete(delete_my_duty))
+        .route("/api/me/statistics", get(my_statistics))
+        .route("/api/me/achievements", get(my_achievements))
+        .route(
+            "/api/me/achievements/progress",
+            get(my_achievement_progress),
+        )
+        .route(
+            "/api/admin/achievements",
+            get(admin_achievements).post(save_admin_achievement),
+        )
+        .route(
+            "/api/admin/achievements/{achievement_id}",
+            axum::routing::delete(delete_admin_achievement),
+        )
+        .route(
+            "/api/admin/achievements/{achievement_id}/awards",
+            axum::routing::delete(revoke_admin_achievement_for_all),
+        )
+        .route(
+            "/api/admin/accounts/{account_id}/achievements",
+            get(admin_account_achievements),
+        )
+        .route(
+            "/api/admin/accounts/{account_id}/achievements/{achievement_id}",
+            axum::routing::delete(revoke_admin_achievement),
+        )
         .route(
             "/api/files/{id}",
-            axum::routing::patch(update_file).delete(delete_file),
+            get(download_file).patch(update_file).delete(delete_file),
         )
         .fallback_service(static_files)
+        .with_state(state)
+        .merge(personal::router(personal))
         .layer(DefaultBodyLimit::max(64 * 1024 * 1024))
         .layer(middleware::from_fn(static_cache_headers))
         .layer(CompressionLayer::new())
-        .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .layer(TraceLayer::new_for_http());
 
     info!(%address, data = %data_directory.display(), web = %web_directory.display(), "DienstenLezer-server gestart");
     let listener = tokio::net::TcpListener::bind(address).await?;
@@ -293,14 +347,24 @@ async fn catalog(
     let records = state.records.read().await;
     let organization = state.organization.read().await.clone();
     let admin_settings = state.settings.read().await.clone();
-    let files = records.iter().map(file_summary).collect::<Vec<_>>();
+    let may_manage_files = state
+        .personal
+        .optional_account(&headers)
+        .await
+        .is_some_and(|account| account.role == "admin");
+    let files = if may_manage_files {
+        records.iter().map(file_summary).collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
     let mut segment_revisions = BTreeMap::new();
     for segment in DAY_SEGMENTS {
         segment_revisions.insert(segment.to_owned(), segment_revision(&records, segment));
     }
+    let revision = catalog_revision(&records, &organization)?;
     let response = CatalogResponse {
         schema_version: STORAGE_SCHEMA_VERSION,
-        revision: hash_json(&(files.as_slice(), &organization))?,
+        revision,
         segment_revisions,
         organization,
         admin_settings,
@@ -319,10 +383,7 @@ async fn schedule(
     let records = state.records.read().await;
     let organization = state.organization.read().await;
     let division_ids = selected_division_ids(query.divisions.as_deref(), &organization)?;
-    let catalog_revision = hash_json(&(
-        records.iter().map(file_summary).collect::<Vec<_>>(),
-        &*organization,
-    ))?;
+    let catalog_revision = catalog_revision(&records, &organization)?;
     let key = schedule_key(&segment, &division_ids);
     let response = ScheduleResponse {
         schema_version: STORAGE_SCHEMA_VERSION,
@@ -338,10 +399,428 @@ async fn schedule(
                     && record.day_segment == segment
                     && division_ids.contains(&record.division_id)
             })
-            .map(|record| record.parse_result.clone())
+            .map(enriched_parse_result)
             .collect(),
     };
     etagged_json(&headers, &response)
+}
+
+fn enriched_parse_result(record: &StoredFileRecord) -> Value {
+    let mut result = record.parse_result.clone();
+    let Some(object) = result.as_object_mut() else {
+        return result;
+    };
+    let content_hash = record
+        .content_hash
+        .clone()
+        .map(Value::String)
+        .unwrap_or(Value::Null);
+    object.insert("sourceFileId".to_owned(), Value::String(record.id.clone()));
+    object.insert(
+        "divisionId".to_owned(),
+        Value::String(record.division_id.clone()),
+    );
+    object.insert("sourceContentHash".to_owned(), content_hash.clone());
+    for collection in ["diensten", "movements"] {
+        if let Some(values) = object.get_mut(collection).and_then(Value::as_array_mut) {
+            for value in values {
+                if let Some(item) = value.as_object_mut() {
+                    item.insert("sourceFileId".to_owned(), Value::String(record.id.clone()));
+                    item.insert(
+                        "divisionId".to_owned(),
+                        Value::String(record.division_id.clone()),
+                    );
+                    item.insert("sourceContentHash".to_owned(), content_hash.clone());
+                }
+            }
+        }
+    }
+    result
+}
+
+async fn list_my_duties(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    state
+        .personal_data
+        .list_duties(&account.id)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn export_my_duties(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    state
+        .personal_data
+        .export_duties(&account.id)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn confirm_my_duty(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<ConfirmDutyRequest>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, true).await?;
+    NaiveDate::parse_from_str(&request.operational_date, "%Y-%m-%d")
+        .map_err(|_| api_error(StatusCode::BAD_REQUEST, "Ongeldige operationele datum."))?;
+    let origin = request.origin.as_deref().unwrap_or("guidance");
+    if !matches!(origin, "guidance" | "manual" | "admin") {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Ongeldige registratiebron.",
+        ));
+    }
+    let snapshot = {
+        let records = state.records.read().await;
+        let record = records
+            .iter()
+            .find(|record| record.id == request.source_file_id)
+            .ok_or_else(|| {
+                api_error(
+                    StatusCode::NOT_FOUND,
+                    "De oorspronkelijke dienstbron bestaat niet meer.",
+                )
+            })?;
+        duty_snapshot(
+            record,
+            &request.operational_date,
+            &request.service_number,
+            origin,
+        )?
+    };
+    state
+        .personal_data
+        .confirm_duty(&account.id, snapshot)
+        .await
+        .map(|record| (StatusCode::CREATED, Json(record)))
+        .map_err(|message| {
+            api_error(
+                if message.contains("al bevestigd") {
+                    StatusCode::CONFLICT
+                } else {
+                    StatusCode::BAD_REQUEST
+                },
+                message,
+            )
+        })
+}
+
+async fn delete_my_duty(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, true).await?;
+    state
+        .personal_data
+        .delete_duty(&account.id, &id, &account.id)
+        .await
+        .map(|_| StatusCode::NO_CONTENT)
+        .map_err(|message| api_error(StatusCode::NOT_FOUND, message))
+}
+
+async fn my_statistics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    state
+        .personal_data
+        .statistics(&account.id)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn my_achievements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    state
+        .personal_data
+        .earned_achievements(&account.id)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn my_achievement_progress(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    state
+        .personal_data
+        .achievement_progress(&account.id)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn admin_achievements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    if account.role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Alleen admins kunnen achievements beheren.",
+        ));
+    }
+    state
+        .personal_data
+        .list_achievement_definitions()
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn save_admin_achievement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<AchievementInput>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
+    state
+        .personal_data
+        .save_achievement(request)
+        .await
+        .map(Json)
+        .map_err(|message| api_error(StatusCode::BAD_REQUEST, message))
+}
+
+async fn delete_admin_achievement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(achievement_id): AxumPath<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
+    state
+        .personal_data
+        .delete_achievement(&achievement_id)
+        .await
+        .map_err(|message| api_error(StatusCode::BAD_REQUEST, message))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn revoke_admin_achievement_for_all(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(achievement_id): AxumPath<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let actor = require_account(&state, &headers, true).await?;
+    if actor.role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Alleen admins kunnen achievements bij iedereen intrekken.",
+        ));
+    }
+    state
+        .personal_data
+        .revoke_achievement_for_all(&achievement_id, &actor.id)
+        .await
+        .map_err(|message| api_error(StatusCode::BAD_REQUEST, message))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn admin_account_achievements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(account_id): AxumPath<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    if account.role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Alleen admins kunnen behaalde achievements beheren.",
+        ));
+    }
+    state
+        .personal_data
+        .earned_achievements(&account_id)
+        .await
+        .map(Json)
+        .map_err(internal_error)
+}
+
+async fn revoke_admin_achievement(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath((account_id, achievement_id)): AxumPath<(String, String)>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let actor = require_account(&state, &headers, true).await?;
+    if actor.role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Alleen admins kunnen behaalde achievements intrekken.",
+        ));
+    }
+    state
+        .personal_data
+        .revoke_achievement(&account_id, &achievement_id, &actor.id)
+        .await
+        .map_err(|message| api_error(StatusCode::BAD_REQUEST, message))?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn duty_snapshot(
+    record: &StoredFileRecord,
+    operational_date: &str,
+    service_number: &str,
+    origin: &str,
+) -> Result<DutySnapshot, (StatusCode, Json<ApiError>)> {
+    let service = record
+        .parse_result
+        .get("diensten")
+        .and_then(Value::as_array)
+        .and_then(|services| {
+            services.iter().find(|service| {
+                service
+                    .get("serviceNumber")
+                    .and_then(Value::as_str)
+                    .is_some_and(|value| value.eq_ignore_ascii_case(service_number))
+            })
+        })
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::NOT_FOUND,
+                "Dienst niet gevonden in de gekozen pdf-bron.",
+            )
+        })?;
+    let movements = record
+        .parse_result
+        .get("movements")
+        .and_then(Value::as_array)
+        .map(|movements| {
+            movements
+                .iter()
+                .filter(|movement| {
+                    movement
+                        .get("dienstnummer")
+                        .and_then(Value::as_str)
+                        .is_some_and(|value| value.eq_ignore_ascii_case(service_number))
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if movements.is_empty() {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Deze dienst bevat geen registreerbare regels.",
+        ));
+    }
+    let mut segments = Vec::new();
+    for movement in &movements {
+        let Some(start) = movement
+            .get("vertrek")
+            .and_then(Value::as_str)
+            .and_then(operational_minute)
+        else {
+            continue;
+        };
+        let Some(mut end) = movement
+            .get("aankomst")
+            .and_then(Value::as_str)
+            .and_then(operational_minute)
+        else {
+            continue;
+        };
+        while end < start {
+            end += 24 * 60;
+        }
+        let movement_type = movement
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or("overig")
+            .to_owned();
+        let raw = movement.get("raw").and_then(Value::as_str).unwrap_or("");
+        segments.push(DutySegmentSnapshot {
+            movement_type,
+            line_number: without_legacy_ov_chip_number(
+                movement.get("lijnnummer").and_then(Value::as_str),
+                movement.get("ritnummer").and_then(Value::as_str),
+                raw,
+            ),
+            trip_number: movement
+                .get("ritnummer")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            material_type: movement
+                .get("materieelsoort")
+                .and_then(Value::as_str)
+                .map(str::to_owned),
+            start_minute: start,
+            end_minute: end,
+            source_movement_id: movement
+                .get("id")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_owned(),
+            unpaid: format!(
+                "{} {} {}",
+                movement.get("van").and_then(Value::as_str).unwrap_or(""),
+                movement.get("naar").and_then(Value::as_str).unwrap_or(""),
+                raw
+            )
+            .to_lowercase()
+            .contains("onbetaalde rust"),
+        });
+    }
+    let derived_start = segments
+        .iter()
+        .map(|segment| segment.start_minute)
+        .min()
+        .ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Diensttijden ontbreken."))?;
+    let derived_end = segments
+        .iter()
+        .map(|segment| segment.end_minute)
+        .max()
+        .unwrap_or(derived_start);
+    let start_minute = service
+        .get("start")
+        .and_then(Value::as_str)
+        .and_then(operational_minute)
+        .unwrap_or(derived_start);
+    let mut end_minute = service
+        .get("end")
+        .and_then(Value::as_str)
+        .and_then(operational_minute)
+        .unwrap_or(derived_end);
+    while end_minute < start_minute {
+        end_minute += 24 * 60;
+    }
+    Ok(DutySnapshot {
+        operational_date: operational_date.to_owned(),
+        source_file_id: record.id.clone(),
+        source_content_hash: record.content_hash.clone(),
+        division_id: record.division_id.clone(),
+        service_number: service
+            .get("serviceNumber")
+            .and_then(Value::as_str)
+            .unwrap_or(service_number)
+            .to_owned(),
+        start_minute,
+        end_minute,
+        origin: origin.to_owned(),
+        segments,
+    })
+}
+
+fn operational_minute(value: &str) -> Option<i64> {
+    let (hours, minutes) = value.split_once(':')?;
+    let raw = hours.parse::<i64>().ok()? * 60 + minutes.parse::<i64>().ok()?;
+    Some(if raw < 4 * 60 { raw + 24 * 60 } else { raw })
 }
 
 async fn qbuzz_live_from_schedule(
@@ -375,8 +854,10 @@ async fn qbuzz_live_legacy(
 
 async fn check_files(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(request): Json<ContentHashCheckRequest>,
-) -> Json<ContentHashCheckResponse> {
+) -> Result<Json<ContentHashCheckResponse>, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
     let records = state.records.read().await;
     let existing = request
         .content_hashes
@@ -387,13 +868,15 @@ async fn check_files(
                 .any(|record| record.content_hash.as_deref() == Some(candidate.as_str()))
         })
         .collect();
-    Json(ContentHashCheckResponse { existing })
+    Ok(Json(ContentHashCheckResponse { existing }))
 }
 
 async fn upload_file(
     State(state): State<AppState>,
+    headers: HeaderMap,
     mut multipart: Multipart,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
     let mut record = None;
     let mut pdf = None;
     while let Some(field) = multipart.next_field().await.map_err(bad_request)? {
@@ -443,8 +926,10 @@ fn hex_sha256(bytes: &[u8]) -> String {
 async fn update_file(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
     Json(patch): Json<StoredFilePatch>,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
     if let Some(segment) = patch.day_segment.as_deref() {
         validate_segment(segment)?;
     }
@@ -465,6 +950,10 @@ async fn update_file(
     if let Some(division_id) = patch.division_id {
         record.division_id = division_id;
     }
+    if let Some(parse_result) = patch.parse_result {
+        validate_parse_result(&parse_result)?;
+        record.parse_result = parse_result;
+    }
     let path = state
         .files_directory
         .join(format!("{}.json", file_key(&id)));
@@ -472,10 +961,57 @@ async fn update_file(
     Ok(StatusCode::NO_CONTENT)
 }
 
+async fn download_file(
+    State(state): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
+) -> Result<Response, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    if account.role != "admin" {
+        return Err(api_error(
+            StatusCode::FORBIDDEN,
+            "Alleen een admin mag opgeslagen pdf's opnieuw uitlezen.",
+        ));
+    }
+    let exists = state
+        .records
+        .read()
+        .await
+        .iter()
+        .any(|record| record.id == id);
+    if !exists {
+        return Err(api_error(StatusCode::NOT_FOUND, "Bestand niet gevonden."));
+    }
+    let bytes = tokio::fs::read(state.files_directory.join(format!("{}.pdf", file_key(&id))))
+        .await
+        .map_err(|_| api_error(StatusCode::NOT_FOUND, "Pdf-bestand ontbreekt."))?;
+    Ok(([(header::CONTENT_TYPE, "application/pdf")], bytes).into_response())
+}
+
+fn validate_parse_result(parse_result: &Value) -> Result<(), (StatusCode, Json<ApiError>)> {
+    if parse_result
+        .get("diensten")
+        .and_then(Value::as_array)
+        .is_none()
+        || parse_result
+            .get("movements")
+            .and_then(Value::as_array)
+            .is_none()
+    {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Het opnieuw ingelezen parse-resultaat is onvolledig.",
+        ));
+    }
+    Ok(())
+}
+
 async fn update_organization(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(organization): Json<OrganizationConfig>,
 ) -> Result<Json<OrganizationConfig>, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
     validate_organization(&organization)?;
     let records = state.records.read().await;
     let division_ids = organization
@@ -499,8 +1035,10 @@ async fn update_organization(
 
 async fn update_admin_settings(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(settings): Json<AdminSettings>,
 ) -> Result<Json<AdminSettings>, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
     let settings = normalize_admin_settings(settings)?;
     write_json(&state.settings_path, &settings).await?;
     *state.settings.write().await = settings.clone();
@@ -510,7 +1048,9 @@ async fn update_admin_settings(
 async fn delete_file(
     State(state): State<AppState>,
     AxumPath(id): AxumPath<String>,
+    headers: HeaderMap,
 ) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    require_admin(&state, &headers).await?;
     let key = file_key(&id);
     remove_if_present(&state.files_directory.join(format!("{key}.json"))).await?;
     remove_if_present(&state.files_directory.join(format!("{key}.pdf"))).await?;
@@ -660,6 +1200,18 @@ fn file_summary(record: &StoredFileRecord) -> StoredFileSummary {
 
 fn value_array_len(value: &Value, key: &str) -> usize {
     value.get(key).and_then(Value::as_array).map_or(0, Vec::len)
+}
+
+fn catalog_revision(
+    records: &[StoredFileRecord],
+    organization: &OrganizationConfig,
+) -> Result<String, (StatusCode, Json<ApiError>)> {
+    let files = records.iter().map(file_summary).collect::<Vec<_>>();
+    let segment_revisions = DAY_SEGMENTS
+        .iter()
+        .map(|segment| ((*segment).to_owned(), segment_revision(records, segment)))
+        .collect::<BTreeMap<_, _>>();
+    hash_json(&(files, organization, segment_revisions))
 }
 
 fn segment_revision(records: &[StoredFileRecord], segment: &str) -> String {
@@ -1018,6 +1570,13 @@ async fn static_cache_headers(request: Request<Body>, next: Next) -> Response {
             header::CACHE_CONTROL,
             HeaderValue::from_static("public, max-age=31536000, immutable"),
         );
+    } else if path.starts_with("/api/auth/")
+        || path.starts_with("/api/me/")
+        || path.starts_with("/api/admin/")
+    {
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     } else if !path.starts_with("/api/") {
         response
             .headers_mut()
@@ -1041,6 +1600,44 @@ fn api_error(status: StatusCode, error: impl std::fmt::Display) -> (StatusCode, 
             error: error.to_string(),
         }),
     )
+}
+
+async fn require_admin(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<(), (StatusCode, Json<ApiError>)> {
+    state
+        .personal
+        .require_admin(headers)
+        .await
+        .map(|_| ())
+        .map_err(|error| {
+            let status = if error.contains("Log eerst in") || error.contains("verlopen") {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            api_error(status, error)
+        })
+}
+
+async fn require_account(
+    state: &AppState,
+    headers: &HeaderMap,
+    verify_csrf: bool,
+) -> Result<dienstenlezer::personal::AccountSummary, (StatusCode, Json<ApiError>)> {
+    state
+        .personal
+        .require_account(headers, verify_csrf)
+        .await
+        .map_err(|error| {
+            let status = if error.contains("Log eerst in") || error.contains("verlopen") {
+                StatusCode::UNAUTHORIZED
+            } else {
+                StatusCode::FORBIDDEN
+            };
+            api_error(status, error)
+        })
 }
 
 async fn shutdown_signal() {

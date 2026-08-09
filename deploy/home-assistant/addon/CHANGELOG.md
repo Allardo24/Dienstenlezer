@@ -1,5 +1,16 @@
 # Wijzigingen
 
+## 1.4.0
+
+- Accounts met gebruikers- en adminrollen, langdurige sessies en servergecontroleerde beheertoegang toegevoegd.
+- Gereden diensten kunnen worden bevestigd, gecorrigeerd, geexporteerd en worden gebruikt voor persoonlijke statistieken.
+- Achievements ondersteunen voortgang, samengestelde voorwaarden, divisies, voorwaarden per dienst en opeenvolgende diensten.
+- Lijn-, pauze- en materieelminuten worden uit de bevestigde diensthistorie berekend.
+- Dienstbegeleiding en overname-informatie zijn consistenter gemaakt en bevestigde-dienstmeldingen verdwijnen direct.
+- Gesplitste ritdelen worden visueel als een geheel behandeld zonder hun werkelijke tijdsafstand te verliezen.
+- Vertraging bij een omloop staat nu op alle schermformaten onder het actuele busnummer.
+- De ongebruikte Windows-executablelaag is verwijderd; lokale ontwikkeling, webserver en Home Assistant blijven behouden.
+
 ## 1.3.4
 
 - Pdf-bestanden kunnen per divisie worden ingedeeld en divisies kunnen centraal onder concessies worden gegroepeerd.

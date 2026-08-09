@@ -31,8 +31,6 @@ for (const directory of ["public", "src", "src-tauri"]) {
       const path = relative(root, source).replaceAll("\\", "/");
       return ![
         "src-tauri/target",
-        "src-tauri/gen",
-        "src-tauri/icons",
       ].some((excluded) => path === excluded || path.startsWith(`${excluded}/`));
     },
   });

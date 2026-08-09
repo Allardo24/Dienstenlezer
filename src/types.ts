@@ -15,6 +15,9 @@ export type Dienst = {
   start?: string;
   end?: string;
   length?: string;
+  sourceFileId?: string;
+  divisionId?: string;
+  sourceContentHash?: string;
 };
 
 export type MovementType = "rit" | "materiaal" | "pauze" | "dienst" | "overig";
@@ -28,12 +31,16 @@ export type Movement = {
   omloopnummer?: string;
   lijnnummer?: string;
   ritnummer?: string;
+  materieelsoort?: string;
   vertrek: string;
   aankomst: string;
   van: string;
   naar: string;
   type: MovementType;
   raw: string;
+  sourceFileId?: string;
+  divisionId?: string;
+  sourceContentHash?: string;
 };
 
 export type ParseResult = {
@@ -41,6 +48,9 @@ export type ParseResult = {
   diensten: Dienst[];
   movements: Movement[];
   warnings: string[];
+  sourceFileId?: string;
+  divisionId?: string;
+  sourceContentHash?: string;
 };
 
 export type DaySegment = "weekday" | "saturday" | "sunday" | "unassigned";
@@ -123,6 +133,7 @@ export type LiveMovementStatus = {
   handoverDelaySeconds?: number;
   handoverExpectedAt?: number;
   handoverDepartureExpectedAt?: number;
+  handoverArrived?: boolean;
   handoverDeparted?: boolean;
   handoverStopSpecific?: boolean;
   handoverPlannedTime?: string;

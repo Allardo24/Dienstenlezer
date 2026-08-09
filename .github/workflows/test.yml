@@ -45,4 +45,4 @@ jobs:
           workspaces: src-tauri
 
       - name: Serverbuild controleren
-        run: cargo build --release --manifest-path src-tauri/Cargo.toml --no-default-features --features server --bin dienstenlezer-server
+        run: cargo build --release --manifest-path src-tauri/Cargo.toml --bin dienstenlezer-server

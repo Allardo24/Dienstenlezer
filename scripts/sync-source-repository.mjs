@@ -20,7 +20,6 @@ for (const entry of await readdir(repository, { withFileTypes: true })) {
 const files = [
   ".dockerignore",
   ".gitignore",
-  "build-exe.bat",
   "compose.yaml",
   "Dockerfile",
   "index.html",

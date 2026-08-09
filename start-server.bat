@@ -3,16 +3,22 @@ setlocal
 set "PATH=%USERPROFILE%\.cargo\bin;C:\Program Files\nodejs;%PATH%"
 cd /d "%~dp0"
 
-if exist "dist\index.html" if exist "src-tauri\target\release\dienstenlezer-server.exe" goto start
-
-echo DienstenLezer wordt eenmalig gebouwd...
+echo DienstenLezer-build wordt gecontroleerd...
 call npm run deploy:build
-if errorlevel 1 exit /b 1
+if errorlevel 1 (
+  echo.
+  echo De build is mislukt. Bekijk de melding hierboven.
+  pause
+  exit /b 1
+)
 
 :start
 netstat -ano | findstr /R /C:":8080 .*LISTENING" >nul
 if not errorlevel 1 (
+  echo.
   echo Poort 8080 is al in gebruik. Sluit eerst een eerder DienstenLezer-venster.
+  echo Er draait waarschijnlijk al een werkende DienstenLezer-server.
+  pause
   exit /b 1
 )
 
@@ -24,3 +30,6 @@ echo DienstenLezer is bereikbaar op http://localhost:8080
 echo Sluit dit venster om de server uit te zetten.
 echo.
 "%CD%\src-tauri\target\release\dienstenlezer-server.exe"
+echo.
+echo DienstenLezer-server is gestopt. Bekijk een eventuele foutmelding hierboven.
+pause
