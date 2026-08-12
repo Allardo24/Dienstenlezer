@@ -9,6 +9,7 @@ import type {
 } from "./types";
 import { serverUrl } from "./serverUrl";
 import { withAuth } from "./auth";
+import { fetchWithRetry } from "./fetchRetry";
 import {
   normalizeOrganization,
   scheduleSelectionKey,
@@ -24,7 +25,7 @@ const SCHEDULE_STORE = "schedules";
 const STORAGE_SCHEMA_VERSION = 3;
 
 async function serverRequest(path: string, init?: RequestInit): Promise<Response> {
-  const response = await fetch(serverUrl(path), withAuth(init));
+  const response = await fetchWithRetry(serverUrl(path), withAuth(init));
   if (!response.ok) {
     const payload = await response.json().catch(() => undefined) as { error?: string } | undefined;
     throw new Error(payload?.error ?? `Bestandenbackend gaf HTTP ${response.status}.`);

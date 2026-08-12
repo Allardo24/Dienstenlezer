@@ -1,6 +1,6 @@
 {
   "name": "dienstenlezer",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "description": "Webapp en server voor diensten-pdf's, omlopen en Qbuzz-livegegevens.",
   "scripts": {
     "dev": "node scripts/dev.mjs",

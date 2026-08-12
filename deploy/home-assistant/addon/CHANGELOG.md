@@ -1,5 +1,12 @@
 # Wijzigingen
 
+## 1.4.2
+
+- Groningse busnummers en vertragingen worden weer gekoppeld nadat OVapi nieuwe numerieke rit-ID's publiceert.
+- De GTFS-cache gebruikt voortaan de echte brondatum en blijft bij een tijdelijke downloadbeperking bruikbaar.
+- Tijdelijk mislukte planning- en live-aanvragen worden eenmaal veilig opnieuw geprobeerd.
+- Een overname wordt pas als afgerond weergegeven nadat het voertuig daadwerkelijk van de overnamehalte is vertrokken.
+
 ## 1.4.1
 
 - Herstelt de ARM64- en AMD64-containerbuild zodat altijd de volledige DienstenLezer-server wordt gepubliceerd.

@@ -1,5 +1,6 @@
 import type { LiveMovementRequest, LiveStatusResponse } from "./types";
 import { serverUrl } from "./serverUrl";
+import { fetchWithRetry } from "./fetchRetry";
 
 const webLiveEtags = new Map<string, string>();
 const webLiveResponses = new Map<string, LiveStatusResponse>();
@@ -86,7 +87,7 @@ export async function getQbuzzLiveStatuses(
   }
   const params = new URLSearchParams({ date });
   params.set("divisions", [...new Set(divisionIds)].sort().join(","));
-  const response = await fetch(serverUrl(`/api/qbuzz/live?${params}`), {
+  const response = await fetchWithRetry(serverUrl(`/api/qbuzz/live?${params}`), {
     method: "GET",
     headers,
     cache: "no-cache",

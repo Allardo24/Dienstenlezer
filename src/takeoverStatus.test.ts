@@ -1,5 +1,10 @@
 import { describe, expect, it } from "vitest";
-import { calculateTakeoverStatus, resolveTakeoverArrivalMinute, resolveTakeoverPlannedMinute } from "./takeoverStatus";
+import {
+  calculateTakeoverStatus,
+  resolveTakeoverArrivalMinute,
+  resolveTakeoverDeparted,
+  resolveTakeoverPlannedMinute,
+} from "./takeoverStatus";
 
 const base = {
   currentMinute: 14 * 60,
@@ -74,5 +79,44 @@ describe("verwachte overname-aankomst", () => {
       expectedArrivalMinute: 19 * 60 + 30,
       delaySeconds: 2 * 60,
     })).toBe(19 * 60 + 28);
+  });
+});
+
+describe("afronden van een overname", () => {
+  it("negeert een te vroege halte-gepasseerdmelding zolang de bus nog wordt verwacht", () => {
+    expect(resolveTakeoverDeparted({
+      currentMinute: 11 * 60 + 6,
+      plannedDepartureMinute: 11 * 60 + 9,
+      expectedArrivalMinute: 11 * 60 + 11,
+      expectedDepartureMinute: 11 * 60 + 11,
+      reportedDeparted: true,
+    })).toBe(false);
+  });
+
+  it("rondt af zodra een inmiddels mogelijke passage expliciet is gemeld", () => {
+    expect(resolveTakeoverDeparted({
+      currentMinute: 11 * 60 + 12,
+      plannedDepartureMinute: 11 * 60 + 9,
+      expectedArrivalMinute: 11 * 60 + 11,
+      expectedDepartureMinute: 11 * 60 + 11,
+      reportedDeparted: true,
+    })).toBe(true);
+  });
+
+  it("leidt vertrek zonder voertuigmelding pas af nadat alle relevante tijden voorbij zijn", () => {
+    expect(resolveTakeoverDeparted({
+      currentMinute: 11 * 60 + 10,
+      plannedDepartureMinute: 11 * 60 + 9,
+      expectedArrivalMinute: 11 * 60 + 11,
+      expectedDepartureMinute: 11 * 60 + 8,
+      reportedDeparted: false,
+    })).toBe(false);
+    expect(resolveTakeoverDeparted({
+      currentMinute: 11 * 60 + 12,
+      plannedDepartureMinute: 11 * 60 + 9,
+      expectedArrivalMinute: 11 * 60 + 11,
+      expectedDepartureMinute: 11 * 60 + 8,
+      reportedDeparted: false,
+    })).toBe(true);
   });
 });

@@ -21,7 +21,8 @@ const GTFS_BASE_URL: &str = "https://gtfs.ovapi.nl/nl/";
 const TRIP_UPDATES_URL: &str = "https://gtfs.ovapi.nl/nl/tripUpdates.pb";
 const VEHICLE_POSITIONS_URL: &str = "https://gtfs.ovapi.nl/nl/vehiclePositions.pb";
 const INDEX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
-const LIVE_INDEX_VERSION: u8 = 4;
+const INDEX_REFRESH_RETRY_SECONDS: i64 = 60 * 60;
+const LIVE_INDEX_VERSION: u8 = 5;
 const REALTIME_CACHE_SECONDS: i64 = 25;
 const APP_USER_AGENT: &str = "DienstenLezer/1.0 (lokale Qbuzz-omloopweergave)";
 const VEHICLE_STATUS_STOPPED_AT: i32 = 1;
@@ -106,6 +107,7 @@ pub struct LiveRuntime {
     progress_handler: Option<ProgressHandler>,
     realtime_cache: Arc<Mutex<Option<Arc<CachedRealtimeFeeds>>>>,
     index_cache: Arc<Mutex<Option<Arc<LiveIndex>>>>,
+    index_refresh_retry_after: Arc<Mutex<i64>>,
 }
 
 impl LiveRuntime {
@@ -117,6 +119,7 @@ impl LiveRuntime {
             progress_handler: None,
             realtime_cache: Arc::new(Mutex::new(None)),
             index_cache: Arc::new(Mutex::new(None)),
+            index_refresh_retry_after: Arc::new(Mutex::new(0)),
         })
     }
 
@@ -566,27 +569,37 @@ async fn realtime_feeds(runtime: &LiveRuntime) -> Result<Arc<CachedRealtimeFeeds
 
 async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveIndex>, String> {
     let mut memory_cache = runtime.index_cache.lock().await;
+    let now = now_timestamp();
     if let Some(index) = memory_cache.as_ref() {
-        if index.version >= LIVE_INDEX_VERSION
-            && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS
-        {
+        if index.version >= LIVE_INDEX_VERSION && index_is_fresh(index, now) {
             return Ok(Arc::clone(index));
         }
     }
 
     let (index_path, archive_path) = runtime.cache_paths();
 
-    if let Ok(index) = read_index(&index_path) {
-        if index.version >= LIVE_INDEX_VERSION
-            && now_timestamp() - index.indexed_at < INDEX_MAX_AGE_SECONDS
-        {
-            let index = Arc::new(index);
+    let disk_index = read_index(&index_path).ok();
+    if let Some(index) = disk_index.as_ref() {
+        if index.version >= LIVE_INDEX_VERSION && index_is_fresh(index, now) {
+            let index = Arc::new(read_index(&index_path)?);
             *memory_cache = Some(Arc::clone(&index));
             return Ok(index);
         }
     }
 
-    if archive_path.is_file() {
+    let fallback_index = memory_cache
+        .as_ref()
+        .filter(|index| index.version >= 4)
+        .map(Arc::clone)
+        .or_else(|| disk_index.filter(|index| index.version >= 4).map(Arc::new));
+
+    if *runtime.index_refresh_retry_after.lock().await > now {
+        if let Some(index) = fallback_index.as_ref() {
+            return Ok(Arc::clone(index));
+        }
+    }
+
+    if archive_is_fresh(&archive_path, now) {
         runtime.report_progress(
             "syncing",
             "Bestaande Qbuzz-dienstregeling lokaal indexeren...",
@@ -613,7 +626,22 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     }
 
     runtime.report_progress("syncing", "Qbuzz-dienstregeling wordt gedownload...", None);
-    download_gtfs(runtime, &archive_path).await?;
+    if let Err(error) = download_gtfs(runtime, &archive_path).await {
+        *runtime.index_refresh_retry_after.lock().await = now + INDEX_REFRESH_RETRY_SECONDS;
+        if let Some(index) = fallback_index {
+            runtime.report_progress(
+                "ready",
+                &format!(
+                    "Actuele Qbuzz-dienstregeling kon niet worden opgehaald; de bestaande index blijft tijdelijk actief. {error}"
+                ),
+                Some(index.indexed_at),
+            );
+            *memory_cache = Some(Arc::clone(&index));
+            return Ok(index);
+        }
+        return Err(error);
+    }
+    *runtime.index_refresh_retry_after.lock().await = 0;
     runtime.report_progress("syncing", "Qbuzz-dienstregeling wordt geindexeerd...", None);
 
     let archive_for_index = archive_path.clone();
@@ -634,6 +662,26 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     let index = Arc::new(index);
     *memory_cache = Some(Arc::clone(&index));
     Ok(index)
+}
+
+fn index_is_fresh(index: &LiveIndex, now: i64) -> bool {
+    index.indexed_at > 0 && now.saturating_sub(index.indexed_at) < INDEX_MAX_AGE_SECONDS
+}
+
+fn archive_is_fresh(path: &Path, now: i64) -> bool {
+    file_modified_timestamp(path)
+        .map(|modified_at| now.saturating_sub(modified_at) < INDEX_MAX_AGE_SECONDS)
+        .unwrap_or(false)
+}
+
+fn file_modified_timestamp(path: &Path) -> Option<i64> {
+    path.metadata()
+        .ok()?
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
 }
 
 async fn download_gtfs(runtime: &LiveRuntime, destination: &Path) -> Result<(), String> {
@@ -820,7 +868,7 @@ fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex,
     let mut index = LiveIndex {
         version: LIVE_INDEX_VERSION,
         operational_date,
-        indexed_at: now_timestamp(),
+        indexed_at: file_modified_timestamp(path).unwrap_or_else(now_timestamp),
         trips,
         calendar,
         calendar_exceptions,
@@ -1428,6 +1476,25 @@ mod tests {
             to: "Weteringbrug".to_owned(),
             r#type: "rit".to_owned(),
         }
+    }
+
+    #[test]
+    fn index_freshness_uses_the_gtfs_source_timestamp() {
+        let mut index = LiveIndex {
+            version: LIVE_INDEX_VERSION,
+            operational_date: String::new(),
+            indexed_at: 1_000,
+            trips: Vec::new(),
+            calendar: HashMap::new(),
+            calendar_exceptions: HashMap::new(),
+            trips_by_line_and_number: HashMap::new(),
+        };
+
+        assert!(index_is_fresh(&index, 1_000 + INDEX_MAX_AGE_SECONDS - 1));
+        assert!(!index_is_fresh(&index, 1_000 + INDEX_MAX_AGE_SECONDS));
+
+        index.indexed_at = 0;
+        assert!(!index_is_fresh(&index, 1_000));
     }
 
     #[test]

@@ -10,6 +10,40 @@ export type TakeoverStatus = {
   shouldShowTopAlert: boolean;
 };
 
+export function resolveTakeoverDeparted({
+  currentMinute,
+  plannedDepartureMinute,
+  expectedArrivalMinute,
+  expectedDepartureMinute,
+  reportedDeparted,
+}: {
+  currentMinute: number;
+  plannedDepartureMinute: number;
+  expectedArrivalMinute: number;
+  expectedDepartureMinute?: number;
+  reportedDeparted: boolean;
+}): boolean {
+  // VehiclePositions can briefly carry a stop sequence from an earlier trip.
+  // Never let that stale sequence finish a takeover before this bus can arrive.
+  if (currentMinute < expectedArrivalMinute) {
+    return false;
+  }
+
+  if (reportedDeparted) {
+    return true;
+  }
+
+  if (expectedDepartureMinute === undefined) {
+    return false;
+  }
+
+  return currentMinute > Math.max(
+    plannedDepartureMinute,
+    expectedArrivalMinute,
+    expectedDepartureMinute,
+  );
+}
+
 export function resolveTakeoverArrivalMinute({
   plannedArrivalMinute,
   delaySeconds,

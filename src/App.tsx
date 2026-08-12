@@ -31,7 +31,12 @@ import { deleteWageSettings, readWageSettings, writeWageSettings } from "./wage/
 import { DEFAULT_WAGE_SETTINGS, type WageSettings } from "./wage/types";
 import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, plannedMarkerMinute } from "./live";
 import { hasInterveningDriver, toOperationalMinute, type DutyVehicleInterval } from "./guidanceLogic";
-import { calculateTakeoverStatus, resolveTakeoverArrivalMinute, resolveTakeoverPlannedMinute } from "./takeoverStatus";
+import {
+  calculateTakeoverStatus,
+  resolveTakeoverArrivalMinute,
+  resolveTakeoverDeparted,
+  resolveTakeoverPlannedMinute,
+} from "./takeoverStatus";
 import { isBuslessDriverRow, withoutLegacyOvChipNumber } from "./pdfColumns";
 import { DEFAULT_BUSLESS_ACTIONS, normaliseBuslessActions } from "./buslessActions";
 import {
@@ -3142,9 +3147,15 @@ function guidanceTakeoverDisplay(
       parseTime(formatEpochClock(live.handoverDepartureExpectedAt)) ?? takeover.entry.timing.start,
       takeover.entry.timing.start,
     );
-  const departed = live.handoverDeparted === true
-    || expectedDepartureMinute !== undefined && currentMinute > expectedDepartureMinute
-    || !hasLiveData && currentMinute > takeover.entry.timing.start;
+  const departed = hasLiveData
+    ? resolveTakeoverDeparted({
+      currentMinute,
+      plannedDepartureMinute: takeover.entry.timing.start,
+      expectedArrivalMinute,
+      expectedDepartureMinute,
+      reportedDeparted: live.handoverDeparted === true,
+    })
+    : currentMinute > takeover.entry.timing.start;
 
   return {
     ...calculateTakeoverStatus({
