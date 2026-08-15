@@ -184,6 +184,8 @@ export async function reparseStoredPdfFiles(
   onProgress?: (completed: number, total: number) => void,
 ): Promise<void> {
   const { parsePdfFiles } = await import("./pdfParser");
+  const reparsed: Array<{ id: string; parseResult: StoredPdfFile["parseResult"] }> = [];
+
   for (const [index, summary] of files.entries()) {
     const response = await serverRequest(`/api/files/${encodeURIComponent(summary.id)}`, { cache: "no-cache" });
     const pdf = new File([await response.blob()], summary.name, {
@@ -191,9 +193,29 @@ export async function reparseStoredPdfFiles(
       lastModified: summary.lastModified,
     });
     const [parseResult] = await parsePdfFiles([pdf]);
-    await updateServerFile(summary.id, { parseResult });
+    assertUsableReparseResult(summary.name, parseResult);
+    reparsed.push({ id: summary.id, parseResult });
     onProgress?.(index + 1, files.length);
   }
+
+  for (const file of reparsed) {
+    await updateServerFile(file.id, { parseResult: file.parseResult });
+  }
+}
+
+export function assertUsableReparseResult(
+  fileName: string,
+  parseResult: StoredPdfFile["parseResult"],
+): void {
+  if (parseResult.diensten.length > 0 && parseResult.movements.length > 0) {
+    return;
+  }
+
+  const warning = parseResult.warnings.find((message) => message.trim().length > 0);
+  const detail = warning ? ` ${warning}` : "";
+  throw new Error(
+    `\"${fileName}\" leverde geen bruikbare diensten op. De bestaande gegevens zijn niet vervangen.${detail}`,
+  );
 }
 
 export async function saveOrganizationConfig(config: OrganizationConfig): Promise<OrganizationConfig> {

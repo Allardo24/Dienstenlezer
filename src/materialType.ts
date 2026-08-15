@@ -2,18 +2,30 @@ import type { Movement, MovementType } from "./types";
 
 export function extractMaterialType(raw: string): string | undefined {
   const normalized = raw.replace(/\s+/g, " ").trim();
-  if (/^bus\s+(?:parkeren|naar\s+lader|van(?:\s+lader)?|aan\s+lader|staat\s+voor\s+pantograaf)\b/i.test(normalized)) {
+  if (!normalized || isNonMaterialAction(normalized)) {
     return undefined;
   }
-  if (!/(?:\bbus\b|\biveco\b|\bvolvo\b|\byutong\b|\bebusco\b|\bvdl\b|\bwaterstof\b|\belektrische\b)/i.test(normalized)) {
+
+  const hasTakeoverPrefix = /^meenemen\s+/i.test(normalized);
+  const hasServiceTransferSuffix = /\s+(?:van|voor)\s+dienst\s+\S+/i.test(normalized);
+  if (!hasTakeoverPrefix && !hasServiceTransferSuffix) {
     return undefined;
   }
+
   const cleaned = normalized
     .replace(/^meenemen\s+/i, "")
     .replace(/\s+(?:van|voor)\s+dienst\s+\S+.*$/i, "")
     .replace(/\s+op\s+perron\s+\S+$/i, "")
     .trim();
-  return cleaned || undefined;
+  return cleaned && !isNonVehicleDescription(cleaned) ? cleaned : undefined;
+}
+
+function isNonMaterialAction(value: string): boolean {
+  return /^(?:bus\s+(?:parkeren|naar\s+lader|van(?:\s+lader)?|aan\s+lader|staat\s+voor\s+pantograaf)|aflosauto)\b/i.test(value);
+}
+
+function isNonVehicleDescription(value: string): boolean {
+  return /^(?:aflosauto|dienstauto|taxi)\b/i.test(value);
 }
 
 export function propagateMaterialByLoop(movements: Movement[]): Movement[] {

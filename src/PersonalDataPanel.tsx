@@ -14,6 +14,7 @@ import {
   revokeAccountAchievement,
   revokeAchievementForAll,
   saveAchievement,
+  type AchievementCondition,
   type AchievementDefinition,
   type AchievementProgress,
   type DutyRecord,
@@ -21,7 +22,7 @@ import {
   type EarnedAchievement,
   type PersonalStatistics,
 } from "./personalData";
-import type { Division } from "./types";
+import type { Concession, Division } from "./types";
 
 export function PersonalDataPanel() {
   const dutiesPerPage = 5;
@@ -220,7 +221,13 @@ export function PersonalDataPanel() {
   );
 }
 
-export function AchievementManagement({ divisions }: { divisions: Division[] }) {
+export function AchievementManagement({
+  divisions,
+  concessions,
+}: {
+  divisions: Division[];
+  concessions: Concession[];
+}) {
   const [definitions, setDefinitions] = useState<AchievementDefinition[]>([]);
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
@@ -265,12 +272,12 @@ export function AchievementManagement({ divisions }: { divisions: Division[] }) 
 
   const selectedLines = mergeAchievementLines(lines, parseAchievementLines(lineDraft));
   const selectedMaterialTypes = mergeAchievementValues(materialTypes, parseAchievementValues(materialDraft));
-  const selectedDivision = divisions.find((division) => division.id === divisionId);
+  const selectedScope = achievementScopeLabel(divisionId || undefined, divisions, concessions);
   const rulePreview = achievementRulePreview(
     metric,
     selectedLines,
     selectedMaterialTypes,
-    selectedDivision?.name,
+    selectedScope,
     withinSingleDuty,
     consecutive,
     comparison,
@@ -382,7 +389,13 @@ export function AchievementManagement({ divisions }: { divisions: Division[] }) 
       <div><p className="eyebrow">Admin</p><h2>Achievements beheren</h2></div>
       <ul className="achievement-definition-list">
         {definitions.map((definition) => <li key={definition.id}>
-          <div><strong>{definition.title}</strong><span>v{definition.version} · {definition.enabled ? "Actief" : "Uit"}</span></div>
+          <div>
+            <strong>{definition.title}</strong>
+            <span>v{definition.version} · {definition.enabled ? "Actief" : "Uit"}</span>
+            <span className="achievement-condition-summary">
+              <b>ALS</b> {achievementConditionPreview(definition.condition, divisions, concessions)}
+            </span>
+          </div>
           <div className="achievement-definition-actions">
             <button className="secondary-button" type="button" onClick={() => void toggle(definition)}>{definition.enabled ? "Uitschakelen" : "Inschakelen"}</button>
             <button className="secondary-button danger" type="button" onClick={() => void revokeForAll(definition)}>Bij iedereen intrekken</button>
@@ -529,14 +542,14 @@ function achievementRulePreview(
   metric: AchievementMetric,
   lines: string[],
   materialTypes: string[],
-  divisionName: string | undefined,
+  scopeLabel: string | undefined,
   withinSingleDuty: boolean,
   consecutive: boolean,
   comparison: "gt" | "gte" | "lt" | "lte" | "eq",
   value: number,
 ): string {
   const comparisonText = { gt: "groter is dan", gte: "minimaal", lt: "kleiner is dan", lte: "maximaal", eq: "gelijk is aan" }[comparison];
-  const scope = divisionName ? ` binnen divisie ${divisionName}` : "";
+  const scope = scopeLabel ? ` ${scopeLabel}` : "";
   const dutyScope = withinSingleDuty ? " binnen dezelfde dienst" : "";
   const materialLabel = materialTypes.length > 0 ? materialTypes.join(" + ") : "alle materieelsoorten";
   const subject = {
@@ -552,6 +565,66 @@ function achievementRulePreview(
     fullDutyLines: `het aantal ${consecutive ? "opeenvolgende " : ""}volledige diensten met alleen ${lines.map((line) => `L${line}`).join(" + ")}${scope}`,
   }[metric];
   return `${subject} ${comparisonText} ${value}`;
+}
+
+function achievementConditionPreview(
+  condition: AchievementCondition,
+  divisions: Division[],
+  concessions: Concession[],
+): string {
+  if (condition.kind === "group") {
+    const separator = condition.operator === "all" ? " EN " : " OF ";
+    return condition.conditions
+      .map((child) => `(${achievementConditionPreview(child, divisions, concessions)})`)
+      .join(separator);
+  }
+
+  const scopeLabel = achievementScopeLabel(condition.divisionId, divisions, concessions) ?? "over alle divisies";
+  if (condition.comparison === "between") {
+    const subject = achievementRulePreview(
+      condition.metric,
+      condition.lines,
+      condition.materialTypes ?? [],
+      scopeLabel,
+      condition.withinSingleDuty ?? false,
+      condition.consecutive ?? false,
+      "eq",
+      condition.value,
+    ).replace(/ gelijk is aan .+$/, "");
+    return `${subject} tussen ${condition.value} en ${condition.maxValue ?? condition.value} ligt`;
+  }
+
+  return achievementRulePreview(
+    condition.metric,
+    condition.lines,
+    condition.materialTypes ?? [],
+    scopeLabel,
+    condition.withinSingleDuty ?? false,
+    condition.consecutive ?? false,
+    condition.comparison,
+    condition.value,
+  );
+}
+
+function achievementScopeLabel(
+  scopeId: string | undefined,
+  divisions: Division[],
+  concessions: Concession[],
+): string | undefined {
+  if (!scopeId) return undefined;
+
+  const division = divisions.find((candidate) => candidate.id === scopeId);
+  if (division) {
+    const concession = concessions.find((candidate) => candidate.id === division.concessionId);
+    return concession
+      ? `binnen divisie ${division.name} (concessie ${concession.name})`
+      : `binnen divisie ${division.name}`;
+  }
+
+  const concession = concessions.find((candidate) => candidate.id === scopeId);
+  if (concession) return `binnen concessie ${concession.name}`;
+
+  return `binnen opgeslagen scope ${scopeId}`;
 }
 function formatDate(value: string): string { return new Intl.DateTimeFormat("nl-NL", { dateStyle: "medium" }).format(new Date(`${value}T12:00:00`)); }
 function formatMinutes(value: number): string { return value < 60 ? `${value} min` : `${Math.floor(value / 60)}u ${value % 60}m`; }

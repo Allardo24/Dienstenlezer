@@ -1,5 +1,12 @@
 # Wijzigingen
 
+## 1.4.3
+
+- Pdf-bestanden worden bij herladen eerst volledig gecontroleerd; een mislukte verwerking kan de bestaande diensttabellen niet meer leegmaken.
+- De compatibele pdf-parser werkt ook op browsers zonder de nieuwste JavaScript-functies en lege parse-resultaten worden door de server geweigerd.
+- Materieelsoorten worden flexibel uit dienstbladteksten overgenomen zonder een vaste lijst met fabrikanten of modellen.
+- Achievementregels tonen in het adminscherm hun volledige divisie- en concessiescope; persoonlijke criteria worden correct tussen React en Rust opgeslagen.
+
 ## 1.4.2
 
 - Groningse busnummers en vertragingen worden weer gekoppeld nadat OVapi nieuwe numerieke rit-ID's publiceert.

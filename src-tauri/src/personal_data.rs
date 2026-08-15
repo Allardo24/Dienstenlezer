@@ -118,16 +118,17 @@ pub enum AchievementCondition {
         metric: String,
         #[serde(default)]
         lines: Vec<String>,
-        #[serde(default)]
+        #[serde(default, rename = "materialTypes", alias = "material_types")]
         material_types: Vec<String>,
-        #[serde(default)]
+        #[serde(default, rename = "divisionId", alias = "division_id")]
         division_id: Option<String>,
-        #[serde(default)]
+        #[serde(default, rename = "withinSingleDuty", alias = "within_single_duty")]
         within_single_duty: bool,
         #[serde(default)]
         consecutive: bool,
         comparison: String,
         value: i64,
+        #[serde(rename = "maxValue", alias = "max_value")]
         max_value: Option<i64>,
     },
 }
@@ -1358,6 +1359,30 @@ fn ensure_column(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn achievement_condition_preserves_client_scope_and_reads_legacy_json() {
+        let client_condition: AchievementCondition = serde_json::from_str(
+            r#"{"kind":"metric","metric":"uniqueLines","lines":[],"materialTypes":[],"divisionId":"lkn","withinSingleDuty":true,"consecutive":false,"comparison":"eq","value":27,"maxValue":null}"#,
+        )
+        .expect("client achievement condition");
+
+        let serialized = serde_json::to_value(&client_condition).expect("serialized condition");
+        assert_eq!(serialized["divisionId"], "lkn");
+        assert_eq!(serialized["withinSingleDuty"], true);
+        assert!(serialized.get("division_id").is_none());
+
+        let legacy_condition: AchievementCondition = serde_json::from_str(
+            r#"{"kind":"metric","metric":"uniqueLines","lines":[],"material_types":[],"division_id":"lkn","within_single_duty":false,"consecutive":false,"comparison":"eq","value":27,"max_value":null}"#,
+        )
+        .expect("legacy stored achievement condition");
+        match legacy_condition {
+            AchievementCondition::Metric { division_id, .. } => {
+                assert_eq!(division_id.as_deref(), Some("lkn"));
+            }
+            AchievementCondition::Group { .. } => panic!("expected metric condition"),
+        }
+    }
 
     #[test]
     fn evaluates_grouped_conditions() {

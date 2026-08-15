@@ -1,5 +1,5 @@
-import * as pdfjsLib from "pdfjs-dist";
-import pdfWorker from "pdfjs-dist/build/pdf.worker.mjs?url";
+import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
+import pdfWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import { detectMovementColumnLayout, isBuslessDriverRow, textInMovementColumn } from "./pdfColumns";
 import { extractMaterialType, isVehicleMovement, propagateMaterialByLoop } from "./materialType";
 import type { Dienst, Movement, MovementType, ParseResult, TextItem } from "./types";

@@ -894,6 +894,7 @@ async fn upload_file(
         record.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Bestandsmetadata ontbreekt."))?;
     validate_segment(&record.day_segment)?;
     validate_division_exists(&record.division_id, &*state.organization.read().await)?;
+    validate_parse_result(&record.parse_result)?;
     let pdf = pdf.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Pdf-bestand ontbreekt."))?;
 
     let content_hash = hex_sha256(&pdf);
@@ -989,18 +990,18 @@ async fn download_file(
 }
 
 fn validate_parse_result(parse_result: &Value) -> Result<(), (StatusCode, Json<ApiError>)> {
-    if parse_result
-        .get("diensten")
-        .and_then(Value::as_array)
-        .is_none()
-        || parse_result
-            .get("movements")
-            .and_then(Value::as_array)
-            .is_none()
-    {
+    let services = parse_result.get("diensten").and_then(Value::as_array);
+    let movements = parse_result.get("movements").and_then(Value::as_array);
+    if services.is_none() || movements.is_none() {
         return Err(api_error(
             StatusCode::BAD_REQUEST,
             "Het opnieuw ingelezen parse-resultaat is onvolledig.",
+        ));
+    }
+    if services.is_some_and(Vec::is_empty) || movements.is_some_and(Vec::is_empty) {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Het opnieuw ingelezen parse-resultaat bevat geen diensten of ritregels; de bestaande gegevens zijn behouden.",
         ));
     }
     Ok(())
@@ -1682,6 +1683,20 @@ mod tests {
         let summary = file_summary(&record("weekday", true));
         assert_eq!(summary.service_count, 1);
         assert_eq!(summary.movement_count, 1);
+    }
+
+    #[test]
+    fn empty_parse_result_is_rejected() {
+        let result = validate_parse_result(&serde_json::json!({
+            "diensten": [],
+            "movements": []
+        }));
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn populated_parse_result_is_accepted() {
+        assert!(validate_parse_result(&record("weekday", true).parse_result).is_ok());
     }
 
     #[test]

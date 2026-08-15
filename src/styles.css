@@ -331,6 +331,19 @@
   gap: 6px;
 }
 
+.achievement-definition-list .achievement-condition-summary {
+  display: block;
+  margin-top: 5px;
+  color: #284f5d;
+  line-height: 1.35;
+}
+
+.achievement-condition-summary b {
+  color: #087d8f;
+  font-size: 0.72rem;
+  letter-spacing: 0;
+}
+
 .achievement-list li span,
 .duty-history-list li span,
 .achievement-definition-list li span {

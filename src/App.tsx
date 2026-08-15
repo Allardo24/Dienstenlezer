@@ -1401,7 +1401,12 @@ function SettingsPage({
         )}
 
         {isAdmin && settingsTab === "accounts" && <AccountManagement />}
-        {isAdmin && settingsTab === "achievements" && <AchievementManagement divisions={organization.divisions} />}
+        {isAdmin && settingsTab === "achievements" && (
+          <AchievementManagement
+            divisions={organization.divisions}
+            concessions={organization.concessions}
+          />
+        )}
       </div>
     </section>
   );

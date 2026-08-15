@@ -30,11 +30,22 @@ describe("materieelsoort uit dienstblad", () => {
     );
     expect(extractMaterialType("Meenemen Volvo 12m Stad")).toBe("Volvo 12m Stad");
     expect(extractMaterialType("Iveco 12 mtr Stad voor dienst 6001")).toBe("Iveco 12 mtr Stad");
+    expect(extractMaterialType("Meenemen Mercedes-Benz eCitaro 18m")).toBe("Mercedes-Benz eCitaro 18m");
+    expect(extractMaterialType("BYD K11U 13m voor dienst 6201")).toBe("BYD K11U 13m");
+    expect(extractMaterialType("Nieuw nog onbekend bustype van dienst G6202")).toBe("Nieuw nog onbekend bustype");
+    expect(extractMaterialType("Capacity paars voor dienst 3044")).toBe("Capacity paars");
+    expect(extractMaterialType("Q-liner 14 meter Dubbeldekker van Hool van dienst 3405")).toBe(
+      "Q-liner 14 meter Dubbeldekker van Hool",
+    );
+    expect(extractMaterialType("Meenemen Aflosauto")).toBeUndefined();
+    expect(extractMaterialType("Aflosauto van dienst 1308")).toBeUndefined();
+    expect(extractMaterialType("Aflosauto voor dienst 3211")).toBeUndefined();
     expect(extractMaterialType("Bus parkeren op 1J")).toBeUndefined();
     expect(extractMaterialType("Bus aan lader")).toBeUndefined();
     expect(extractMaterialType("Bus naar lader 1F")).toBeUndefined();
     expect(extractMaterialType("Bus van 1H")).toBeUndefined();
     expect(extractMaterialType("Bus staat voor pantograaf 3B")).toBeUndefined();
+    expect(extractMaterialType("Netto Pauze")).toBeUndefined();
   });
 
   it("neemt de omschrijving alleen mee zolang dezelfde busomloop actief blijft", () => {
