@@ -1,5 +1,9 @@
 # Wijzigingen
 
+## 1.4.4
+
+- Verbetering in de diensteninvoer
+
 ## 1.4.3
 
 - Pdf-bestanden worden bij herladen eerst volledig gecontroleerd; een mislukte verwerking kan de bestaande diensttabellen niet meer leegmaken.

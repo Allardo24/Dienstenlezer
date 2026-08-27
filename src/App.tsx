@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode, type RefObject } from "react";
 import {
   AlertTriangle,
   BusFront,
@@ -1541,9 +1541,7 @@ function FilesPage({
     return <LoadingState />;
   }
 
-  const visibleSegments = DAY_SEGMENTS.filter((segment) => {
-    return segment.id !== "unassigned" || files.some((file) => file.daySegment === "unassigned");
-  });
+  const scheduledSegments = DAY_SEGMENTS.filter((segment) => segment.id !== "unassigned");
 
   return (
     <section className="files-section">
@@ -1554,114 +1552,284 @@ function FilesPage({
         </div>
       </div>
 
-      <div className="segment-grid" style={{ gridTemplateColumns: `repeat(${visibleSegments.length}, minmax(230px, 1fr))` }}>
-        {visibleSegments.map((segment) => {
-          const segmentFiles = files.filter((file) => file.daySegment === segment.id);
-
-          return (
-            <section
-              className="segment-column"
-              key={segment.id}
-              onDragEnter={(event) => event.currentTarget.classList.add("drag-over")}
-              onDragLeave={(event) => event.currentTarget.classList.remove("drag-over")}
-              onDragOver={(event) => {
-                event.preventDefault();
-                event.dataTransfer.dropEffect = "move";
-              }}
-              onDrop={(event) => {
-                event.preventDefault();
-                event.currentTarget.classList.remove("drag-over");
-                const fileId = event.dataTransfer.getData("text/plain");
-                const file = files.find((item) => item.id === fileId);
-
-                if (file && file.daySegment !== segment.id) {
-                  void onMove(file, segment.id);
-                }
-              }}
-            >
-              <header>
-                <div>
-                  <strong>{segment.label}</strong>
-                  <span>{segment.description}</span>
-                </div>
-                <em>{segmentFiles.length}</em>
-              </header>
-
-              <div className="file-list">
-                {segmentFiles.length === 0 ? (
-                  <p className="segment-empty">Sleep bestanden hierheen.</p>
-                ) : (
-                  segmentFiles.map((file) => (
-                    <article
-                      className={!file.enabled ? "file-card disabled" : "file-card"}
-                      draggable
-                      key={file.id}
-                      onDragStart={(event) => {
-                        event.dataTransfer.effectAllowed = "move";
-                        event.dataTransfer.setData("text/plain", file.id);
-                        event.currentTarget.classList.add("dragging");
-                      }}
-                      onDragEnd={(event) => {
-                        event.currentTarget.classList.remove("dragging");
-                      }}
-                    >
-                      <div>
-                        <strong>{file.name}</strong>
-                        <span>
-                          {formatFileSize(file.size)} - {file.serviceCount} diensten - {file.movementCount} regels
-                        </span>
-                        <small>Toegevoegd {formatDateTime(file.uploadedAt)}</small>
-                        <label className="file-division">
-                          <span>Divisie</span>
-                          <select
-                            value={file.divisionId}
-                            onChange={(event) => void onMoveDivision(file, event.target.value)}
-                          >
-                            <option value="">Nog niet ingedeeld</option>
-                            {organization.concessions.map((concession) => (
-                              <optgroup label={concession.name} key={concession.id}>
-                                {organization.divisions
-                                  .filter((division) => division.concessionId === concession.id)
-                                  .map((division) => (
-                                    <option value={division.id} key={division.id}>{division.name}</option>
-                                  ))}
-                              </optgroup>
-                            ))}
-                          </select>
-                        </label>
-                        <div className="segment-actions" aria-label="Bestand verplaatsen">
-                          {DAY_SEGMENTS.map((targetSegment) => (
-                            <button
-                              className={file.daySegment === targetSegment.id ? "active" : ""}
-                              disabled={file.daySegment === targetSegment.id}
-                              key={targetSegment.id}
-                              type="button"
-                              onClick={() => void onMove(file, targetSegment.id)}
-                            >
-                              {targetSegment.id === "unassigned" ? "Niet ingedeeld" : targetSegment.label}
-                            </button>
-                          ))}
-                        </div>
-                      </div>
-                      <div className="file-actions">
-                        <button className="secondary-button" type="button" onClick={() => void onToggle(file)}>
-                          {file.enabled ? <EyeOff size={16} /> : <Eye size={16} />}
-                          {file.enabled ? "Uitzetten" : "Aanzetten"}
-                        </button>
-                        <button className="secondary-button danger" type="button" onClick={() => void onDelete(file)}>
-                          <Trash2 size={16} />
-                          Verwijderen
-                        </button>
-                      </div>
-                    </article>
-                  ))
-                )}
-              </div>
-            </section>
-          );
-        })}
+      <div className="file-status-groups">
+        <FileStatusGroup
+          enabled
+          files={files}
+          organization={organization}
+          scheduledSegments={scheduledSegments}
+          onToggle={onToggle}
+          onMove={onMove}
+          onMoveDivision={onMoveDivision}
+          onDelete={onDelete}
+        />
+        <FileStatusGroup
+          enabled={false}
+          files={files}
+          organization={organization}
+          scheduledSegments={scheduledSegments}
+          onToggle={onToggle}
+          onMove={onMove}
+          onMoveDivision={onMoveDivision}
+          onDelete={onDelete}
+        />
       </div>
     </section>
+  );
+}
+
+type FileStatusGroupProps = {
+  enabled: boolean;
+  files: StoredPdfFileSummary[];
+  organization: OrganizationConfig;
+  scheduledSegments: typeof DAY_SEGMENTS;
+  onToggle: (file: StoredPdfFileSummary) => Promise<void>;
+  onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
+  onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onDelete: (file: StoredPdfFileSummary) => Promise<void>;
+};
+
+function FileStatusGroup({
+  enabled,
+  files,
+  organization,
+  scheduledSegments,
+  onToggle,
+  onMove,
+  onMoveDivision,
+  onDelete,
+}: FileStatusGroupProps) {
+  const statusFiles = files.filter((file) => file.enabled === enabled);
+  const knownDivisionIds = new Set(organization.divisions.map((division) => division.id));
+  const hasUnassignedFiles = statusFiles.some((file) => !knownDivisionIds.has(file.divisionId));
+  const divisionRows = [
+    ...organization.divisions,
+    ...(hasUnassignedFiles ? [{ id: "", name: "Nog niet ingedeeld", concessionId: "" }] : []),
+  ];
+
+  async function moveFile(file: StoredPdfFileSummary, daySegment: DaySegment, divisionId: string) {
+    if (file.divisionId !== divisionId) {
+      await onMoveDivision(file, divisionId);
+    }
+    if (file.daySegment !== daySegment) {
+      await onMove(file, daySegment);
+    }
+  }
+
+  return (
+    <section className={enabled ? "file-status-group active" : "file-status-group inactive"}>
+      <header className="file-status-heading">
+        <div>
+          <h3>{enabled ? "Actieve dienstenpakketten" : "Inactieve dienstenpakketten"}</h3>
+          <span>
+            {enabled
+              ? "Deze bestanden worden gebruikt in de overzichten."
+              : "Deze bestanden blijven bewaard, maar tellen niet mee in de overzichten."}
+          </span>
+        </div>
+        <em>{statusFiles.length}</em>
+      </header>
+
+      <div className="file-status-matrix-scroll">
+        <div className="file-status-matrix">
+          <div className="file-day-columns-heading" aria-hidden="true">
+            {scheduledSegments.map((segment) => (
+              <div key={segment.id}>
+                <strong>{segment.label}</strong>
+                <span>{segment.description}</span>
+              </div>
+            ))}
+          </div>
+
+          {divisionRows.length === 0 ? (
+            <p className="file-status-empty">Maak eerst een divisie aan om bestanden in te delen.</p>
+          ) : divisionRows.map((division) => {
+            const divisionFiles = statusFiles.filter((file) => (
+              division.id ? file.divisionId === division.id : !knownDivisionIds.has(file.divisionId)
+            ));
+            const concession = organization.concessions.find((candidate) => candidate.id === division.concessionId);
+            const unassignedDayFiles = divisionFiles.filter((file) => file.daySegment === "unassigned");
+
+            return (
+              <section className="division-file-row" key={division.id || "unassigned"}>
+                <header>
+                  <div>
+                    <strong>{division.name}</strong>
+                    {concession && <span>{concession.name}</span>}
+                  </div>
+                  <em>{divisionFiles.length} {divisionFiles.length === 1 ? "bestand" : "bestanden"}</em>
+                </header>
+
+                <div className="division-day-grid">
+                  {scheduledSegments.map((segment) => {
+                    const segmentFiles = divisionFiles.filter((file) => file.daySegment === segment.id);
+                    return (
+                      <FileDropCell
+                        divisionId={division.id}
+                        files={files}
+                        isEmpty={segmentFiles.length === 0}
+                        key={segment.id}
+                        label={segment.label}
+                        segment={segment.id}
+                        onDropFile={moveFile}
+                      >
+                        {segmentFiles.length === 0 ? (
+                          <p className="segment-empty">Geen bestanden</p>
+                        ) : segmentFiles.map((file) => (
+                          <StoredFileCard
+                            file={file}
+                            key={file.id}
+                            organization={organization}
+                            onToggle={onToggle}
+                            onMove={onMove}
+                            onMoveDivision={onMoveDivision}
+                            onDelete={onDelete}
+                          />
+                        ))}
+                      </FileDropCell>
+                    );
+                  })}
+                </div>
+
+                {unassignedDayFiles.length > 0 && (
+                  <div className="unassigned-day-files">
+                    <div>
+                      <strong>Nog geen dagsoort</strong>
+                      <span>Kies Ma-vr, Za of Zo, of sleep het bestand naar een kolom.</span>
+                    </div>
+                    <div className="file-list">
+                      {unassignedDayFiles.map((file) => (
+                        <StoredFileCard
+                          file={file}
+                          key={file.id}
+                          organization={organization}
+                          onToggle={onToggle}
+                          onMove={onMove}
+                          onMoveDivision={onMoveDivision}
+                          onDelete={onDelete}
+                        />
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function FileDropCell({
+  divisionId,
+  files,
+  isEmpty,
+  label,
+  segment,
+  onDropFile,
+  children,
+}: {
+  divisionId: string;
+  files: StoredPdfFileSummary[];
+  isEmpty: boolean;
+  label: string;
+  segment: DaySegment;
+  onDropFile: (file: StoredPdfFileSummary, daySegment: DaySegment, divisionId: string) => Promise<void>;
+  children: ReactNode;
+}) {
+  return (
+    <div
+      className={isEmpty ? "division-day-cell empty" : "division-day-cell"}
+      data-day-label={label}
+      onDragEnter={(event) => event.currentTarget.classList.add("drag-over")}
+      onDragLeave={(event) => event.currentTarget.classList.remove("drag-over")}
+      onDragOver={(event) => {
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+      }}
+      onDrop={(event) => {
+        event.preventDefault();
+        event.currentTarget.classList.remove("drag-over");
+        const file = files.find((item) => item.id === event.dataTransfer.getData("text/plain"));
+        if (file) {
+          void onDropFile(file, segment, divisionId);
+        }
+      }}
+    >
+      {children}
+    </div>
+  );
+}
+
+function StoredFileCard({
+  file,
+  organization,
+  onToggle,
+  onMove,
+  onMoveDivision,
+  onDelete,
+}: {
+  file: StoredPdfFileSummary;
+  organization: OrganizationConfig;
+  onToggle: (file: StoredPdfFileSummary) => Promise<void>;
+  onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
+  onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onDelete: (file: StoredPdfFileSummary) => Promise<void>;
+}) {
+  return (
+    <article
+      className={!file.enabled ? "file-card disabled" : "file-card"}
+      draggable
+      onDragStart={(event) => {
+        event.dataTransfer.effectAllowed = "move";
+        event.dataTransfer.setData("text/plain", file.id);
+        event.currentTarget.classList.add("dragging");
+      }}
+      onDragEnd={(event) => event.currentTarget.classList.remove("dragging")}
+    >
+      <div>
+        <strong>{file.name}</strong>
+        <span>{formatFileSize(file.size)} - {file.serviceCount} diensten - {file.movementCount} regels</span>
+        <small>Toegevoegd {formatDateTime(file.uploadedAt)}</small>
+        <label className="file-division">
+          <span>Divisie</span>
+          <select value={file.divisionId} onChange={(event) => void onMoveDivision(file, event.target.value)}>
+            <option value="">Nog niet ingedeeld</option>
+            {organization.concessions.map((concession) => (
+              <optgroup label={concession.name} key={concession.id}>
+                {organization.divisions
+                  .filter((division) => division.concessionId === concession.id)
+                  .map((division) => <option value={division.id} key={division.id}>{division.name}</option>)}
+              </optgroup>
+            ))}
+          </select>
+        </label>
+        <div className="segment-actions" aria-label="Bestand verplaatsen">
+          {DAY_SEGMENTS.map((targetSegment) => (
+            <button
+              className={file.daySegment === targetSegment.id ? "active" : ""}
+              disabled={file.daySegment === targetSegment.id}
+              key={targetSegment.id}
+              type="button"
+              onClick={() => void onMove(file, targetSegment.id)}
+            >
+              {targetSegment.id === "unassigned" ? "Niet ingedeeld" : targetSegment.label}
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="file-actions">
+        <button className="secondary-button" type="button" onClick={() => void onToggle(file)}>
+          {file.enabled ? <EyeOff size={16} /> : <Eye size={16} />}
+          {file.enabled ? "Uitzetten" : "Aanzetten"}
+        </button>
+        <button className="secondary-button danger" type="button" onClick={() => void onDelete(file)}>
+          <Trash2 size={16} />
+          Verwijderen
+        </button>
+      </div>
+    </article>
   );
 }
 

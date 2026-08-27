@@ -959,7 +959,7 @@ h2 {
   padding-left: 0;
 }
 
-.settings-files-tab .segment-grid {
+.settings-files-tab .file-status-groups {
   padding-right: 0;
   padding-left: 0;
 }
@@ -2149,58 +2149,242 @@ tbody tr:hover {
   justify-content: flex-end;
 }
 
-.segment-grid {
+.file-status-groups {
   display: grid;
-  gap: 12px;
+  gap: 22px;
   padding: 14px;
 }
 
-.segment-column {
-  min-height: 260px;
-  padding: 10px;
-  border: 1px dashed #aec4d5;
+.file-status-group {
+  overflow: hidden;
+  border: 1px solid #cad9e4;
   border-radius: 8px;
-  background: #f8fbfd;
+  background: #fff;
 }
 
-.segment-column.drag-over {
-  border-color: #168299;
-  background: #eefafd;
-  box-shadow: 0 0 0 3px rgba(22, 130, 153, 0.12);
+.file-status-group.inactive {
+  border-color: #d6dee5;
+  background: #f8fafb;
 }
 
-.segment-column header {
+.file-status-heading {
   display: flex;
+  align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  margin-bottom: 10px;
+  gap: 14px;
+  padding: 14px 16px;
+  border-bottom: 1px solid #dce7ee;
+  background: #f2f8fa;
 }
 
-.segment-column header strong,
-.segment-column header span {
-  display: block;
+.file-status-group.inactive > .file-status-heading {
+  background: #f1f4f6;
 }
 
-.segment-column header strong {
-  color: #0d3a48;
+.file-status-heading h3 {
+  margin: 0 0 3px;
+  color: #123643;
+  font-size: 1rem;
 }
 
-.segment-column header span {
-  margin-top: 2px;
-  color: #687885;
-  font-size: 0.84rem;
+.file-status-heading span {
+  color: #647887;
+  font-size: 0.8rem;
 }
 
-.segment-column header em {
+.file-status-heading em {
   display: grid;
-  min-width: 28px;
-  height: 28px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 8px;
   place-items: center;
   border-radius: 999px;
   color: #075e70;
   background: #dff4f6;
   font-style: normal;
   font-weight: 900;
+}
+
+.file-status-group.inactive .file-status-heading em {
+  color: #566a78;
+  background: #e2e8ec;
+}
+
+.file-status-matrix-scroll {
+  overflow-x: auto;
+}
+
+.file-status-matrix {
+  display: grid;
+  min-width: 780px;
+}
+
+.file-day-columns-heading,
+.division-day-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.file-day-columns-heading {
+  border-bottom: 1px solid #dce7ee;
+  background: #fff;
+}
+
+.file-day-columns-heading > div {
+  padding: 10px 12px;
+}
+
+.file-day-columns-heading > div + div {
+  border-left: 1px solid #dce7ee;
+}
+
+.file-day-columns-heading strong,
+.file-day-columns-heading span {
+  display: block;
+}
+
+.file-day-columns-heading strong {
+  color: #0d3a48;
+  font-size: 0.86rem;
+}
+
+.file-day-columns-heading span {
+  margin-top: 2px;
+  color: #71828f;
+  font-size: 0.72rem;
+}
+
+.division-file-row + .division-file-row {
+  border-top: 2px solid #c8d8e3;
+}
+
+.division-file-row > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 9px 12px;
+  border-bottom: 1px solid #e2eaf0;
+  background: #eaf4f7;
+}
+
+.file-status-group.inactive .division-file-row > header {
+  background: #edf1f4;
+}
+
+.division-file-row > header strong,
+.division-file-row > header span {
+  display: block;
+}
+
+.division-file-row > header strong {
+  color: #123643;
+}
+
+.division-file-row > header span,
+.division-file-row > header em {
+  color: #6b7e8b;
+  font-size: 0.74rem;
+}
+
+.division-file-row > header span {
+  margin-top: 1px;
+}
+
+.division-file-row > header em {
+  font-style: normal;
+  font-weight: 800;
+}
+
+.division-day-cell {
+  min-width: 0;
+  min-height: 92px;
+  padding: 9px;
+  background: #fbfdfe;
+  transition: background 0.15s ease, box-shadow 0.15s ease;
+}
+
+.division-day-cell.empty {
+  min-height: 58px;
+}
+
+.file-status-group.inactive .division-day-cell {
+  background: #f7f9fa;
+}
+
+.division-day-cell + .division-day-cell {
+  border-left: 1px solid #dce7ee;
+}
+
+.division-day-cell.drag-over {
+  position: relative;
+  z-index: 1;
+  background: #e7f8fb;
+  box-shadow: inset 0 0 0 2px #168299;
+}
+
+.division-day-cell > .file-card + .file-card {
+  margin-top: 8px;
+}
+
+.division-day-cell .segment-empty {
+  padding: 16px 8px;
+  border: 0;
+  color: #95a3ad;
+  background: transparent;
+}
+
+.file-status-matrix .file-card {
+  display: grid;
+  align-items: start;
+  gap: 10px;
+  padding: 10px;
+}
+
+.file-status-matrix .file-actions {
+  justify-content: flex-start;
+}
+
+.file-status-matrix .file-actions .secondary-button {
+  min-height: 32px;
+  padding: 0 9px;
+  font-size: 0.76rem;
+}
+
+.unassigned-day-files {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  gap: 12px;
+  padding: 10px 12px 12px;
+  border-top: 1px dashed #b8cbd8;
+  background: #fff9eb;
+}
+
+.unassigned-day-files > div:first-child strong,
+.unassigned-day-files > div:first-child span {
+  display: block;
+}
+
+.unassigned-day-files > div:first-child strong {
+  color: #604814;
+  font-size: 0.84rem;
+}
+
+.unassigned-day-files > div:first-child span {
+  margin-top: 3px;
+  color: #7c6b43;
+  font-size: 0.74rem;
+}
+
+.unassigned-day-files .file-list {
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.file-status-empty {
+  margin: 0;
+  padding: 24px 14px;
+  color: #7a8a96;
+  text-align: center;
 }
 
 .segment-empty {
@@ -3402,10 +3586,6 @@ tbody tr:hover {
     flex-direction: column;
     height: auto;
     padding: 8px 10px;
-  }
-
-  .segment-grid {
-    grid-template-columns: 1fr;
   }
 
   .overview-tabs {

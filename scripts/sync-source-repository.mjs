@@ -39,6 +39,7 @@ for (const file of files) {
 
 const excluded = [
   "deploy/home-assistant/published-repository",
+  "scripts/publish-ha-release.ps1",
   "src-tauri/target",
 ];
 for (const directory of [".github", "deploy", "public", "scripts", "src", "src-tauri"]) {
