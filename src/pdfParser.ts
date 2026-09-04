@@ -18,7 +18,9 @@ type Row = {
 };
 
 const TIME_RE = /^\d{1,2}:\d{2}$/;
-const SERVICE_RE = /^[A-Z]?\d{4,5}$/;
+const SERVICE_RE = /^[A-Z]{0,3}\d{4,5}$/;
+const SERVICE_LABEL_RE = /^dienst(?:nummer|nr)?\s*:?\s*$/i;
+const INLINE_SERVICE_RE = /^dienst(?:nummer|nr)?\s*:?\s*([A-Z]{0,3}\d{4,5})\s*$/i;
 const DATE_RE = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
 
 export async function parsePdfFiles(files: File[]): Promise<ParseResult[]> {
@@ -98,11 +100,8 @@ function groupRows(items: TextItem[]): Row[] {
 }
 
 function readDienst(sourceFile: string, pageNumber: number, rows: Row[], items: TextItem[]): Dienst {
-  const topRows = rows.filter((row) => row.y > 735);
-  const flattenedTop = topRows.flatMap((row) => row.items);
-  const serviceItem =
-    flattenedTop.find((item) => SERVICE_RE.test(item.text) && item.x > 90 && item.x < 190) ??
-    items.find((item) => SERVICE_RE.test(item.text));
+  const topRows = headerRows(rows, items);
+  const serviceNumber = findServiceNumber(rows, topRows) ?? `pagina-${pageNumber}`;
 
   const date = items.find((item) => DATE_RE.test(item.text))?.text;
   const location = topRows
@@ -112,8 +111,6 @@ function readDienst(sourceFile: string, pageNumber: number, rows: Row[], items: 
   const metaRow = rows.find((row) => row.items.some((item) => item.text === "Start:"));
   const metaTimes = metaRow?.items.filter((item) => TIME_RE.test(item.text)).map((item) => item.text) ?? [];
   const length = metaRow?.items.find((item) => /^\d+u\d{2}$/.test(item.text))?.text;
-  const serviceNumber = serviceItem?.text ?? `pagina-${pageNumber}`;
-
   return {
     id: `${sourceFile}-${pageNumber}-${serviceNumber}`,
     serviceNumber,
@@ -125,6 +122,56 @@ function readDienst(sourceFile: string, pageNumber: number, rows: Row[], items: 
     end: metaTimes[1],
     length,
   };
+}
+
+export function detectServiceNumber(items: TextItem[], pageNumber = 1): string {
+  const rows = groupRows(items);
+  return findServiceNumber(rows, headerRows(rows, items)) ?? `pagina-${pageNumber}`;
+}
+
+function findServiceNumber(rows: Row[], topRows: Row[]): string | undefined {
+  for (const row of rows) {
+    for (const item of row.items) {
+      const inlineMatch = item.text.match(INLINE_SERVICE_RE);
+      if (inlineMatch) {
+        return inlineMatch[1];
+      }
+      if (!SERVICE_LABEL_RE.test(item.text)) {
+        continue;
+      }
+
+      const candidates = row.items
+        .filter((candidate) => candidate !== item && SERVICE_RE.test(candidate.text))
+        .sort((first, second) => {
+          const firstIsRight = first.x >= item.x ? 0 : 1;
+          const secondIsRight = second.x >= item.x ? 0 : 1;
+          return firstIsRight - secondIsRight || Math.abs(first.x - item.x) - Math.abs(second.x - item.x);
+        });
+      if (candidates[0]) {
+        return candidates[0].text;
+      }
+    }
+  }
+
+  const flattenedTop = topRows.flatMap((row) => row.items);
+  return flattenedTop.find((item) => SERVICE_RE.test(item.text) && item.x > 90 && item.x < 190)?.text
+    ?? flattenedTop.find((item) => SERVICE_RE.test(item.text))?.text;
+}
+
+function headerRows(rows: Row[], items: TextItem[]): Row[] {
+  const tableHeaderIndex = rows.findIndex((row) => {
+    const labels = new Set(row.items.map((item) => item.text.toLowerCase().replace(/[^a-z]/g, "")));
+    return labels.has("lijn") && labels.has("vertrek") && labels.has("aankomst");
+  });
+  if (tableHeaderIndex >= 0) {
+    return rows.slice(0, tableHeaderIndex);
+  }
+
+  const yValues = items.map((item) => item.y);
+  const highestY = Math.max(...yValues);
+  const lowestY = Math.min(...yValues);
+  const topBandHeight = Math.max(80, (highestY - lowestY) * 0.2);
+  return rows.filter((row) => row.y >= highestY - topBandHeight);
 }
 
 function readMovements(sourceFile: string, pageNumber: number, rows: Row[], dienst: Dienst): Movement[] {

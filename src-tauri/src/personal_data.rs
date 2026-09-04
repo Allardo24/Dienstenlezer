@@ -919,6 +919,13 @@ fn evaluate_condition_with_duties(
             value,
             max_value,
         } => {
+            if metric == "dutyCount" && division_id.is_some() {
+                let actual = duty_statistics
+                    .iter()
+                    .filter(|duty| division_id.as_ref() == Some(&duty.division_id))
+                    .count() as i64;
+                return compare(actual, comparison, *value, *max_value);
+            }
             if matches!(metric.as_str(), "fullDutyMaterial" | "fullDutyLines") {
                 let matches = duty_statistics.iter().map(|duty| {
                     full_duty_matches(metric, lines, material_types, division_id, duty)
@@ -953,6 +960,9 @@ fn condition_progress(
             operator,
             conditions,
         } => {
+            if let [only_condition] = conditions.as_slice() {
+                return condition_progress(only_condition, statistics, duty_statistics);
+            }
             let met = conditions
                 .iter()
                 .filter(|item| evaluate_condition_with_duties(item, statistics, duty_statistics))
@@ -975,7 +985,12 @@ fn condition_progress(
             value,
             ..
         } => {
-            let current = if matches!(metric.as_str(), "fullDutyMaterial" | "fullDutyLines") {
+            let current = if metric == "dutyCount" && division_id.is_some() {
+                duty_statistics
+                    .iter()
+                    .filter(|duty| division_id.as_ref() == Some(&duty.division_id))
+                    .count() as i64
+            } else if matches!(metric.as_str(), "fullDutyMaterial" | "fullDutyLines") {
                 let matches = duty_statistics.iter().map(|duty| {
                     full_duty_matches(metric, lines, material_types, division_id, duty)
                 });
@@ -1464,6 +1479,44 @@ mod tests {
     }
 
     #[test]
+    fn reports_metric_progress_through_single_condition_json_groups() {
+        let statistics = PersonalStatistics {
+            line_minutes: vec![
+                LineMinutes {
+                    division_id: "zhn".into(),
+                    line_number: "20".into(),
+                    minutes: 75,
+                },
+                LineMinutes {
+                    division_id: "zhn".into(),
+                    line_number: "21".into(),
+                    minutes: 45,
+                },
+            ],
+            ..PersonalStatistics::default()
+        };
+        let condition = AchievementCondition::Group {
+            operator: "all".into(),
+            conditions: vec![AchievementCondition::Metric {
+                metric: "lineMinutes".into(),
+                lines: vec!["20".into(), "21".into()],
+                material_types: vec![],
+                division_id: Some("zhn".into()),
+                within_single_duty: false,
+                consecutive: false,
+                comparison: "gte".into(),
+                value: 600,
+                max_value: None,
+            }],
+        };
+
+        assert_eq!(
+            condition_progress(&condition, &statistics, &[]),
+            (120, 600, "min")
+        );
+    }
+
+    #[test]
     fn rejects_driver_actions_as_material_types() {
         assert_eq!(sanitized_material_type(Some("bus parkeren op 1J")), None);
         assert_eq!(sanitized_material_type(Some("Bus aan lader")), None);
@@ -1552,6 +1605,27 @@ mod tests {
             duty("2026-08-03", "50", 0, "Iveco 12m"),
             duty("2026-08-04", "1", 0, "Yutong 15m"),
         ];
+        let duties_in_zhn = AchievementCondition::Metric {
+            metric: "dutyCount".into(),
+            lines: vec![],
+            material_types: vec![],
+            division_id: Some("zhn".into()),
+            within_single_duty: false,
+            consecutive: false,
+            comparison: "eq".into(),
+            value: 4,
+            max_value: None,
+        };
+        assert!(evaluate_condition_with_duties(
+            &duties_in_zhn,
+            &aggregate,
+            &duties,
+        ));
+        assert_eq!(
+            condition_progress(&duties_in_zhn, &aggregate, &duties),
+            (4, 4, "diensten"),
+        );
+
         let two_hours_pause_in_one_duty = AchievementCondition::Metric {
             metric: "pauseMinutes".into(),
             lines: vec![],

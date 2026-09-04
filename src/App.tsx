@@ -2,6 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type R
 import {
   AlertTriangle,
   BusFront,
+  ChevronRight,
   Clock3,
   Download,
   Eye,
@@ -21,6 +22,7 @@ import {
   UserRound,
   X,
 } from "lucide-react";
+import packageJson from "../package.json";
 import AccountPage, { AccountManagement } from "./AccountPage";
 import { AchievementManagement } from "./PersonalDataPanel";
 import DutyConfirmation from "./DutyConfirmation";
@@ -83,6 +85,7 @@ const DESKTOP_LOOP_COLUMN_WIDTH = 170;
 const MOBILE_LOOP_COLUMN_WIDTH = 84;
 const GUIDANCE_LOCK_KEY = "dienstenlezer-locked-guidance-service";
 const SELECTED_DIVISIONS_KEY = "dienstenlezer-selected-divisions-v1";
+const APP_VERSION = packageJson.version;
 type Page = "loops" | "services" | "guidance" | "settings" | "account";
 
 const DAY_SEGMENTS: { id: DaySegment; label: string; description: string }[] = [
@@ -655,7 +658,10 @@ function App() {
     <main className="app-shell">
       <section className="topbar">
         <div>
-          <p className="eyebrow">DienstenLezer</p>
+          <p className="eyebrow app-brand">
+            DienstenLezer
+            <span className="app-version" title={`DienstenLezer versie ${APP_VERSION}`}>v{APP_VERSION}</span>
+          </p>
           <h1>Omlopen uit diensten-pdf's</h1>
         </div>
         <div className="topbar-actions">
@@ -754,6 +760,7 @@ function App() {
           onDeleteFile={removeStoredFile}
           canManageServer={!accountsAvailable() || authSession?.account.role === "admin"}
           isAdmin={authSession?.account.role === "admin"}
+          currentAccountId={authSession?.account.id}
           wageSettings={authSession ? wageSettings : undefined}
           onWageSettingsChange={saveLocalWageSettings}
           onWageSettingsDelete={removeLocalWageSettings}
@@ -973,6 +980,7 @@ function SettingsPage({
   onDeleteFile,
   canManageServer,
   isAdmin,
+  currentAccountId,
   wageSettings,
   onWageSettingsChange,
   onWageSettingsDelete,
@@ -999,6 +1007,7 @@ function SettingsPage({
   onDeleteFile: (file: StoredPdfFileSummary) => Promise<void>;
   canManageServer: boolean;
   isAdmin: boolean;
+  currentAccountId?: string;
   wageSettings?: WageSettings;
   onWageSettingsChange: (settings: WageSettings) => Promise<void>;
   onWageSettingsDelete: () => Promise<void>;
@@ -1400,7 +1409,9 @@ function SettingsPage({
           </>
         )}
 
-        {isAdmin && settingsTab === "accounts" && <AccountManagement />}
+        {isAdmin && currentAccountId && settingsTab === "accounts" && (
+          <AccountManagement currentAccountId={currentAccountId} />
+        )}
         {isAdmin && settingsTab === "achievements" && (
           <AchievementManagement
             divisions={organization.divisions}
@@ -1599,12 +1610,20 @@ function FileStatusGroup({
   onMoveDivision,
   onDelete,
 }: FileStatusGroupProps) {
+  const [expandedConcessions, setExpandedConcessions] = useState<Record<string, boolean>>({});
   const statusFiles = files.filter((file) => file.enabled === enabled);
   const knownDivisionIds = new Set(organization.divisions.map((division) => division.id));
   const hasUnassignedFiles = statusFiles.some((file) => !knownDivisionIds.has(file.divisionId));
-  const divisionRows = [
-    ...organization.divisions,
-    ...(hasUnassignedFiles ? [{ id: "", name: "Nog niet ingedeeld", concessionId: "" }] : []),
+  const concessionGroups = [
+    ...organization.concessions.map((concession) => ({
+      ...concession,
+      divisions: organization.divisions.filter((division) => division.concessionId === concession.id),
+    })),
+    ...(hasUnassignedFiles ? [{
+      id: "",
+      name: "Nog niet ingedeeld",
+      divisions: [{ id: "", name: "Nog niet ingedeeld", concessionId: "" }],
+    }] : []),
   ];
 
   async function moveFile(file: StoredPdfFileSummary, daySegment: DaySegment, divisionId: string) {
@@ -1641,78 +1660,112 @@ function FileStatusGroup({
             ))}
           </div>
 
-          {divisionRows.length === 0 ? (
+          {concessionGroups.length === 0 ? (
             <p className="file-status-empty">Maak eerst een divisie aan om bestanden in te delen.</p>
-          ) : divisionRows.map((division) => {
-            const divisionFiles = statusFiles.filter((file) => (
-              division.id ? file.divisionId === division.id : !knownDivisionIds.has(file.divisionId)
+          ) : concessionGroups.map((concession) => {
+            const concessionKey = concession.id || "unassigned";
+            const concessionDivisionIds = new Set(concession.divisions.map((division) => division.id));
+            const concessionFiles = statusFiles.filter((file) => (
+              concession.id ? concessionDivisionIds.has(file.divisionId) : !knownDivisionIds.has(file.divisionId)
             ));
-            const concession = organization.concessions.find((candidate) => candidate.id === division.concessionId);
-            const unassignedDayFiles = divisionFiles.filter((file) => file.daySegment === "unassigned");
+            const isExpanded = expandedConcessions[concessionKey] ?? false;
 
             return (
-              <section className="division-file-row" key={division.id || "unassigned"}>
-                <header>
+              <details
+                className="concession-file-group"
+                key={concessionKey}
+                open={isExpanded}
+                onToggle={(event) => {
+                  const open = event.currentTarget.open;
+                  setExpandedConcessions((current) => (
+                    current[concessionKey] === open ? current : { ...current, [concessionKey]: open }
+                  ));
+                }}
+              >
+                <summary>
+                  <ChevronRight size={18} aria-hidden="true" />
                   <div>
-                    <strong>{division.name}</strong>
-                    {concession && <span>{concession.name}</span>}
+                    <strong>{concession.name}</strong>
+                    <span>
+                      {concession.divisions.length} {concession.divisions.length === 1 ? "divisie" : "divisies"}
+                    </span>
                   </div>
-                  <em>{divisionFiles.length} {divisionFiles.length === 1 ? "bestand" : "bestanden"}</em>
-                </header>
+                  <em>{concessionFiles.length} {concessionFiles.length === 1 ? "bestand" : "bestanden"}</em>
+                </summary>
 
-                <div className="division-day-grid">
-                  {scheduledSegments.map((segment) => {
-                    const segmentFiles = divisionFiles.filter((file) => file.daySegment === segment.id);
+                <div className="concession-file-content">
+                  {concession.divisions.length === 0 ? (
+                    <p className="file-status-empty">Deze concessie heeft nog geen divisies.</p>
+                  ) : concession.divisions.map((division) => {
+                    const divisionFiles = statusFiles.filter((file) => (
+                      division.id ? file.divisionId === division.id : !knownDivisionIds.has(file.divisionId)
+                    ));
+                    const unassignedDayFiles = divisionFiles.filter((file) => file.daySegment === "unassigned");
+
                     return (
-                      <FileDropCell
-                        divisionId={division.id}
-                        files={files}
-                        isEmpty={segmentFiles.length === 0}
-                        key={segment.id}
-                        label={segment.label}
-                        segment={segment.id}
-                        onDropFile={moveFile}
-                      >
-                        {segmentFiles.length === 0 ? (
-                          <p className="segment-empty">Geen bestanden</p>
-                        ) : segmentFiles.map((file) => (
-                          <StoredFileCard
-                            file={file}
-                            key={file.id}
-                            organization={organization}
-                            onToggle={onToggle}
-                            onMove={onMove}
-                            onMoveDivision={onMoveDivision}
-                            onDelete={onDelete}
-                          />
-                        ))}
-                      </FileDropCell>
+                      <section className="division-file-row" key={division.id || "unassigned"}>
+                        <header>
+                          <strong>{division.name}</strong>
+                          <em>{divisionFiles.length} {divisionFiles.length === 1 ? "bestand" : "bestanden"}</em>
+                        </header>
+
+                        <div className="division-day-grid">
+                          {scheduledSegments.map((segment) => {
+                            const segmentFiles = divisionFiles.filter((file) => file.daySegment === segment.id);
+                            return (
+                              <FileDropCell
+                                divisionId={division.id}
+                                files={files}
+                                isEmpty={segmentFiles.length === 0}
+                                key={segment.id}
+                                label={segment.label}
+                                segment={segment.id}
+                                onDropFile={moveFile}
+                              >
+                                {segmentFiles.length === 0 ? (
+                                  <p className="segment-empty">Geen bestanden</p>
+                                ) : segmentFiles.map((file) => (
+                                  <StoredFileCard
+                                    file={file}
+                                    key={file.id}
+                                    organization={organization}
+                                    onToggle={onToggle}
+                                    onMove={onMove}
+                                    onMoveDivision={onMoveDivision}
+                                    onDelete={onDelete}
+                                  />
+                                ))}
+                              </FileDropCell>
+                            );
+                          })}
+                        </div>
+
+                        {unassignedDayFiles.length > 0 && (
+                          <div className="unassigned-day-files">
+                            <div>
+                              <strong>Nog geen dagsoort</strong>
+                              <span>Kies Ma-vr, Za of Zo, of sleep het bestand naar een kolom.</span>
+                            </div>
+                            <div className="file-list">
+                              {unassignedDayFiles.map((file) => (
+                                <StoredFileCard
+                                  file={file}
+                                  key={file.id}
+                                  organization={organization}
+                                  onToggle={onToggle}
+                                  onMove={onMove}
+                                  onMoveDivision={onMoveDivision}
+                                  onDelete={onDelete}
+                                />
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </section>
                     );
                   })}
                 </div>
-
-                {unassignedDayFiles.length > 0 && (
-                  <div className="unassigned-day-files">
-                    <div>
-                      <strong>Nog geen dagsoort</strong>
-                      <span>Kies Ma-vr, Za of Zo, of sleep het bestand naar een kolom.</span>
-                    </div>
-                    <div className="file-list">
-                      {unassignedDayFiles.map((file) => (
-                        <StoredFileCard
-                          file={file}
-                          key={file.id}
-                          organization={organization}
-                          onToggle={onToggle}
-                          onMove={onMove}
-                          onMoveDivision={onMoveDivision}
-                          onDelete={onDelete}
-                        />
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </section>
+              </details>
             );
           })}
         </div>
@@ -1956,6 +2009,8 @@ function LiveDataStatus({
       ? "Livegegevens verversen..."
       : sync.state === "error"
         ? "Livegegevens konden niet worden ververst"
+        : sync.state === "unavailable"
+          ? "Geen gekoppelde Qbuzz-ritten"
         : sync.state === "ready"
           ? `${label} bijgewerkt`
           : label;
@@ -2003,8 +2058,6 @@ function DutyGuidance({
   liveSync,
   currentTime,
   liveCurrentTime,
-  timeOverride,
-  onTimeOverride,
   isLocked,
   onLockedChange,
   isDemo,
@@ -2088,24 +2141,18 @@ function DutyGuidance({
             <strong>{selectedService?.serviceNumber ?? selectedServiceNumber}</strong>
           </div>
         ) : (
-          <>
-            <label className="guidance-service-input">
-              <span>Dienstnummer</span>
-              <input
-                list="guidance-services"
-                value={selectedServiceNumber}
-                onChange={(event) => onSelectService(event.target.value)}
-                placeholder={serviceNumbers[0] ?? "V5001"}
-              />
-              <datalist id="guidance-services">
-                {serviceNumbers.map((serviceNumber) => <option key={serviceNumber} value={serviceNumber} />)}
-              </datalist>
-            </label>
-            <label className="guidance-time-input" title="Verandert alleen de weergave van dienstbegeleiding.">
-              <span>Testtijd</span>
-              <input type="time" value={timeOverride} onChange={(event) => onTimeOverride(event.target.value)} />
-            </label>
-          </>
+          <label className="guidance-service-input">
+            <span>Dienstnummer</span>
+            <input
+              list="guidance-services"
+              value={selectedServiceNumber}
+              onChange={(event) => onSelectService(event.target.value)}
+              placeholder={serviceNumbers[0] ?? "V5001"}
+            />
+            <datalist id="guidance-services">
+              {serviceNumbers.map((serviceNumber) => <option key={serviceNumber} value={serviceNumber} />)}
+            </datalist>
+          </label>
         )}
         <label className="guidance-lock-toggle">
           <input

@@ -8,6 +8,7 @@ import {
   login,
   logoutEverywhere,
   type Account,
+  type AccountRole,
   type AuthSession,
 } from "./auth";
 import { PersonalDataPanel } from "./PersonalDataPanel";
@@ -188,11 +189,12 @@ function SignedInAccount({
   );
 }
 
-export function AccountManagement() {
+export function AccountManagement({ currentAccountId }: { currentAccountId: string }) {
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [role, setRole] = useState<"user" | "admin">("user");
+  const [role, setRole] = useState<AccountRole>("user");
+  const [updatingAccountId, setUpdatingAccountId] = useState<string>();
   const [error, setError] = useState<string>();
 
   async function reload() {
@@ -225,6 +227,8 @@ export function AccountManagement() {
   }
 
   async function toggle(account: Account) {
+    setError(undefined);
+    setUpdatingAccountId(account.id);
     try {
       await accountRequest(`/api/admin/accounts/${encodeURIComponent(account.id)}`, {
         method: "PATCH",
@@ -234,6 +238,26 @@ export function AccountManagement() {
       await reload();
     } catch (toggleError) {
       setError(toggleError instanceof Error ? toggleError.message : String(toggleError));
+    } finally {
+      setUpdatingAccountId(undefined);
+    }
+  }
+
+  async function updateRole(account: Account, nextRole: AccountRole) {
+    if (nextRole === account.role || account.id === currentAccountId) return;
+    setError(undefined);
+    setUpdatingAccountId(account.id);
+    try {
+      await accountRequest(`/api/admin/accounts/${encodeURIComponent(account.id)}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ role: nextRole }),
+      });
+      await reload();
+    } catch (updateError) {
+      setError(updateError instanceof Error ? updateError.message : String(updateError));
+    } finally {
+      setUpdatingAccountId(undefined);
     }
   }
 
@@ -246,17 +270,42 @@ export function AccountManagement() {
       <ul className="account-list">
         {accounts.map((account) => (
           <li key={account.id}>
-            <div><strong>{account.username}</strong><span>{account.role === "admin" ? "Admin" : "Gebruiker"}</span></div>
-            <button className="secondary-button" type="button" onClick={() => void toggle(account)}>
-              {account.enabled ? "Uitschakelen" : "Inschakelen"}
-            </button>
+            <div className="account-list-identity">
+              <strong>{account.username}</strong>
+              <span>{account.enabled ? "Actief" : "Uitgeschakeld"}</span>
+            </div>
+            <div className="account-list-actions">
+              <label
+                className="account-role-select"
+                title={account.id === currentAccountId ? "Je kunt je eigen adminrol niet verwijderen." : undefined}
+              >
+                <span>Rol</span>
+                <select
+                  aria-label={`Rol van ${account.username}`}
+                  value={account.role}
+                  disabled={account.id === currentAccountId || updatingAccountId === account.id}
+                  onChange={(event) => void updateRole(account, event.target.value as AccountRole)}
+                >
+                  <option value="user">Gebruiker</option>
+                  <option value="admin">Admin</option>
+                </select>
+              </label>
+              <button
+                className="secondary-button"
+                type="button"
+                disabled={updatingAccountId === account.id}
+                onClick={() => void toggle(account)}
+              >
+                {account.enabled ? "Uitschakelen" : "Inschakelen"}
+              </button>
+            </div>
           </li>
         ))}
       </ul>
       <form className="account-create-form" onSubmit={create}>
         <label><span>Gebruikersnaam</span><input value={username} onChange={(event) => setUsername(event.target.value)} autoComplete="off" required /></label>
         <label><span>Tijdelijk wachtwoord</span><input type="password" value={password} onChange={(event) => setPassword(event.target.value)} autoComplete="new-password" minLength={3} required /></label>
-        <label><span>Rol</span><select value={role} onChange={(event) => setRole(event.target.value as "user" | "admin")}><option value="user">Gebruiker</option><option value="admin">Admin</option></select></label>
+        <label><span>Rol</span><select value={role} onChange={(event) => setRole(event.target.value as AccountRole)}><option value="user">Gebruiker</option><option value="admin">Admin</option></select></label>
         <button className="secondary-button" type="submit"><Plus size={17} /> Account toevoegen</button>
       </form>
       {error && <p className="account-error" role="alert">{error}</p>}

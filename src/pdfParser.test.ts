@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { extractMaterialType, propagateMaterialByLoop } from "./materialType";
-import type { Movement } from "./types";
+import { detectServiceNumber } from "./pdfParser";
+import type { Movement, TextItem } from "./types";
+
+function text(text: string, x: number, y: number): TextItem {
+  return { text, x, y, width: Math.max(10, text.length * 5) };
+}
 
 function movement(overrides: Partial<Movement>): Movement {
   return {
@@ -66,5 +71,64 @@ describe("materieelsoort uit dienstblad", () => {
     expect(inherited.materieelsoort).toBe("Yutong 13m Snelbuzz");
     expect(otherLoop.materieelsoort).toBeUndefined();
     expect(afterReturn.materieelsoort).toBeUndefined();
+  });
+});
+
+describe("dienstnummer uit paginakop", () => {
+  it("kiest het nummer naast Dienst en niet een viercijferige omloop in de tabel", () => {
+    const items = [
+      text("Dienst:", 28, 550),
+      text("D1201", 105, 550),
+      text("Ma-Vr", 190, 530),
+      text("Lijn", 20, 485),
+      text("Ritnr", 80, 485),
+      text("Omloop", 140, 485),
+      text("Vertrek", 205, 485),
+      text("Aankomst", 510, 485),
+      text("0001", 140, 450),
+      text("0102", 140, 420),
+    ];
+
+    expect(detectServiceNumber(items)).toBe("D1201");
+  });
+
+  it("ondersteunt DMG-diensten met een dubbele letterprefix", () => {
+    expect(detectServiceNumber([
+      text("Dienst:", 48, 798),
+      text("CC1251", 119, 798),
+      text("Lijn", 50, 737),
+      text("Vertrek", 271, 737),
+      text("Aankomst", 515, 737),
+      text("0001", 198, 660),
+    ])).toBe("CC1251");
+  });
+
+  it("herkent een dienstnummer dat samen met het label in een tekstfragment staat", () => {
+    expect(detectServiceNumber([
+      text("Dienstnummer: 1201", 25, 560),
+      text("Lijn", 20, 480),
+      text("Vertrek", 205, 480),
+      text("Aankomst", 510, 480),
+      text("0001", 140, 440),
+    ])).toBe("1201");
+  });
+
+  it("gebruikt zonder dienstlabel alleen een nummer uit de paginakop", () => {
+    expect(detectServiceNumber([
+      text("D1201", 105, 550),
+      text("Lijn", 20, 485),
+      text("Vertrek", 205, 485),
+      text("Aankomst", 510, 485),
+      text("0001", 140, 450),
+    ])).toBe("D1201");
+  });
+
+  it("maakt zonder herkenbare paginakop geen dienst van een omloopnummer", () => {
+    expect(detectServiceNumber([
+      text("Lijn", 20, 485),
+      text("Vertrek", 205, 485),
+      text("Aankomst", 510, 485),
+      text("0001", 140, 450),
+    ], 7)).toBe("pagina-7");
   });
 });

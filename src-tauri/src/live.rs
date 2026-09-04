@@ -370,25 +370,41 @@ pub async fn get_live_statuses(
         });
     }
 
-    if !movements.is_empty() && diagnostics.matched == 0 {
-        return Err(format!(
-            "Geen enkele pdf-rit kon uniek aan de Qbuzz-dienstregeling van {date} worden gekoppeld. De geladen pdf-diensten zijn leidend; controleer de Qbuzz-koppeling."
-        ));
-    }
-
     Ok(LiveStatusResponse {
         statuses,
-        sync: LiveSyncState {
-            state: "ready".to_owned(),
-            message: format!(
-                "Qbuzz live: {} ritten gekoppeld, realtime elke 30 seconden ververst.",
-                diagnostics.matched
-            ),
-            indexed_at: Some(index.indexed_at),
-            fetched_at: Some(realtime.fetched_at),
-        },
+        sync: live_sync_state(index.indexed_at, realtime.fetched_at, &diagnostics),
         diagnostics,
     })
+}
+
+fn live_sync_state(
+    indexed_at: i64,
+    fetched_at: i64,
+    diagnostics: &LiveDiagnostics,
+) -> LiveSyncState {
+    if diagnostics.matched == 0 {
+        let message = if diagnostics.requested == 0 {
+            "Geen pdf-ritten binnen twee uur voor of na nu om aan Qbuzz te koppelen."
+        } else {
+            "Binnen het huidige tijdvenster zijn geen passende Qbuzz-ritten gekoppeld. De pdf-diensten blijven leidend."
+        };
+        return LiveSyncState {
+            state: "unavailable".to_owned(),
+            message: message.to_owned(),
+            indexed_at: Some(indexed_at),
+            fetched_at: Some(fetched_at),
+        };
+    }
+
+    LiveSyncState {
+        state: "ready".to_owned(),
+        message: format!(
+            "Qbuzz live: {} ritten gekoppeld, realtime elke 30 seconden ververst.",
+            diagnostics.matched
+        ),
+        indexed_at: Some(indexed_at),
+        fetched_at: Some(fetched_at),
+    }
 }
 
 fn handover_prediction<'a>(
@@ -1443,6 +1459,35 @@ fn now_timestamp() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn zero_matches_are_unavailable_instead_of_a_feed_error() {
+        let diagnostics = LiveDiagnostics {
+            requested: 12,
+            matched: 0,
+            ..LiveDiagnostics::default()
+        };
+
+        let sync = live_sync_state(10, 20, &diagnostics);
+
+        assert_eq!(sync.state, "unavailable");
+        assert!(sync.message.contains("huidige tijdvenster"));
+        assert_eq!(sync.fetched_at, Some(20));
+    }
+
+    #[test]
+    fn matched_trips_keep_the_ready_status() {
+        let diagnostics = LiveDiagnostics {
+            requested: 12,
+            matched: 3,
+            ..LiveDiagnostics::default()
+        };
+
+        let sync = live_sync_state(10, 20, &diagnostics);
+
+        assert_eq!(sync.state, "ready");
+        assert!(sync.message.contains("3 ritten gekoppeld"));
+    }
 
     fn index_with_trip(trip: QbuzzTrip) -> LiveIndex {
         let mut index = LiveIndex {

@@ -1,6 +1,6 @@
 [package]
 name = "dienstenlezer"
-version = "1.4.4"
+version = "1.4.5"
 description = "Diensten-pdf lezer met webbackend en Qbuzz live status"
 authors = ["DienstenLezer"]
 edition = "2021"
