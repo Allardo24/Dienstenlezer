@@ -2,6 +2,7 @@ import { Fragment, useEffect, useLayoutEffect, useMemo, useRef, useState, type R
 import {
   AlertTriangle,
   BusFront,
+  CalendarClock,
   ChevronRight,
   Clock3,
   Download,
@@ -14,6 +15,7 @@ import {
   Plus,
   RefreshCw,
   RotateCcw,
+  Save,
   Search,
   Settings,
   Table2,
@@ -31,6 +33,7 @@ import WageSettingsPanel from "./wage/WageSettingsPanel";
 import { calculateDutyWage } from "./wage/calculate";
 import { deleteWageSettings, readWageSettings, writeWageSettings } from "./wage/storage";
 import { DEFAULT_WAGE_SETTINGS, type WageSettings } from "./wage/types";
+import { DEFAULT_ORT_RATES, normaliseOrtRates } from "./wage/rules";
 import { getCachedQbuzzLiveStatuses, getQbuzzLiveStatuses, plannedMarkerMinute } from "./live";
 import { hasInterveningDriver, toOperationalMinute, type DutyVehicleInterval } from "./guidanceLogic";
 import {
@@ -56,6 +59,7 @@ import {
   updateStoredPdfFileDaySegment,
   updateStoredPdfFileDivision,
   updateStoredPdfFileEnabled,
+  updateStoredPdfFileExpiry,
 } from "./storage";
 import {
   DEFAULT_DIVISION_ID,
@@ -75,6 +79,7 @@ import type {
   LiveSyncState,
   Movement,
   OrganizationConfig,
+  OrtRates,
   ParseResult,
   StoredPdfFile,
   StoredPdfFileSummary,
@@ -183,6 +188,7 @@ function App() {
   const [currentTime, setCurrentTime] = useState(() => new Date());
   const [isPageVisible, setIsPageVisible] = useState(() => document.visibilityState !== "hidden");
   const [buslessActions, setBuslessActions] = useState<string[]>([...DEFAULT_BUSLESS_ACTIONS]);
+  const [ortRates, setOrtRates] = useState<OrtRates>({ ...DEFAULT_ORT_RATES });
   const [authSession, setAuthSession] = useState<AuthSession>();
   const [authLoading, setAuthLoading] = useState(accountsAvailable);
   const [authSetupRequired, setAuthSetupRequired] = useState(false);
@@ -338,6 +344,19 @@ function App() {
   }, []);
 
   useEffect(() => {
+    let currentDate = todayInputValue();
+    const timer = window.setInterval(() => {
+      const nextDate = todayInputValue();
+      if (nextDate !== currentDate) {
+        currentDate = nextDate;
+        void reloadStoredFiles();
+      }
+    }, 60_000);
+
+    return () => window.clearInterval(timer);
+  }, [selectedScheduleScope]);
+
+  useEffect(() => {
     if (previousScheduleScopeRef.current === undefined) {
       previousScheduleScopeRef.current = selectedScheduleScope;
       return;
@@ -454,6 +473,7 @@ function App() {
         setBuslessActions(normaliseBuslessActions(
           cached.catalog.adminSettings?.buslessActions ?? [...DEFAULT_BUSLESS_ACTIONS],
         ));
+        setOrtRates(normaliseOrtRates(cached.catalog.adminSettings?.ortRates));
         setStoredFiles(cached.catalog.files);
         setResults(cached.schedule.results);
         setIsLoadingFiles(false);
@@ -470,6 +490,7 @@ function App() {
       setBuslessActions(normaliseBuslessActions(
         catalog.adminSettings?.buslessActions ?? [...DEFAULT_BUSLESS_ACTIONS],
       ));
+      setOrtRates(normaliseOrtRates(catalog.adminSettings?.ortRates));
       if (!sameStringSet(selectedDivisionIds, effectiveDivisionIds)) {
         setSelectedDivisionIds(effectiveDivisionIds);
         writeSelectedDivisions(effectiveDivisionIds);
@@ -541,10 +562,23 @@ function App() {
   async function updateBuslessActions(actions: string[]) {
     setStorageError(undefined);
     try {
-      const saved = await saveAdminSettings({ buslessActions: actions });
+      const saved = await saveAdminSettings({ buslessActions: actions, ortRates });
       setBuslessActions(saved.buslessActions);
+      setOrtRates(saved.ortRates);
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async function updateOrtRates(rates: OrtRates) {
+    setStorageError(undefined);
+    try {
+      const saved = await saveAdminSettings({ buslessActions, ortRates: rates });
+      setBuslessActions(saved.buslessActions);
+      setOrtRates(saved.ortRates);
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+      throw error;
     }
   }
 
@@ -577,6 +611,11 @@ function App() {
 
   async function moveStoredFileToDivision(file: StoredPdfFileSummary, divisionId: string) {
     await updateStoredPdfFileDivision(file.id, divisionId);
+    await reloadStoredFiles();
+  }
+
+  async function changeStoredFileExpiry(file: StoredPdfFileSummary, expiresOn: string) {
+    await updateStoredPdfFileExpiry(file.id, expiresOn);
     await reloadStoredFiles();
   }
 
@@ -743,6 +782,8 @@ function App() {
           onOrganizationChange={updateOrganization}
           buslessActions={buslessActions}
           onBuslessActionsChange={updateBuslessActions}
+          ortRates={ortRates}
+          onOrtRatesChange={updateOrtRates}
           selectedDivisionIds={selectedDivisionIds}
           onSelectedDivisionsChange={updateSelectedDivisions}
           onExportCsv={exportCsv}
@@ -756,6 +797,7 @@ function App() {
           onToggleFile={toggleStoredFile}
           onMoveFile={moveStoredFile}
           onMoveFileDivision={moveStoredFileToDivision}
+          onFileExpiryChange={changeStoredFileExpiry}
           onReparseFiles={reparseStoredFiles}
           onDeleteFile={removeStoredFile}
           canManageServer={!accountsAvailable() || authSession?.account.role === "admin"}
@@ -783,6 +825,7 @@ function App() {
           isToday={isToday}
           selectedDate={selectedDate}
           wageSettings={authSession ? wageSettings : undefined}
+          ortRates={ortRates}
           personalEnabled={Boolean(authSession)}
         />
       ) : (
@@ -963,6 +1006,8 @@ function SettingsPage({
   onOrganizationChange,
   buslessActions,
   onBuslessActionsChange,
+  ortRates,
+  onOrtRatesChange,
   selectedDivisionIds,
   onSelectedDivisionsChange,
   onExportCsv,
@@ -976,6 +1021,7 @@ function SettingsPage({
   onToggleFile,
   onMoveFile,
   onMoveFileDivision,
+  onFileExpiryChange,
   onReparseFiles,
   onDeleteFile,
   canManageServer,
@@ -990,6 +1036,8 @@ function SettingsPage({
   onOrganizationChange: (organization: OrganizationConfig) => Promise<void>;
   buslessActions: string[];
   onBuslessActionsChange: (actions: string[]) => Promise<void>;
+  ortRates: OrtRates;
+  onOrtRatesChange: (rates: OrtRates) => Promise<void>;
   selectedDivisionIds: string[];
   onSelectedDivisionsChange: (divisionIds: string[]) => void;
   onExportCsv: () => void;
@@ -1003,6 +1051,7 @@ function SettingsPage({
   onToggleFile: (file: StoredPdfFileSummary) => Promise<void>;
   onMoveFile: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveFileDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onFileExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onReparseFiles: () => Promise<void>;
   onDeleteFile: (file: StoredPdfFileSummary) => Promise<void>;
   canManageServer: boolean;
@@ -1213,6 +1262,7 @@ function SettingsPage({
             onToggle={onToggleFile}
             onMove={onMoveFile}
             onMoveDivision={onMoveFileDivision}
+            onExpiryChange={onFileExpiryChange}
             onReparseFiles={onReparseFiles}
             onDelete={onDeleteFile}
           />
@@ -1406,6 +1456,7 @@ function SettingsPage({
             </div>
           </form>
         </section>
+        <OrtSettingsPanel rates={ortRates} onSave={onOrtRatesChange} />
           </>
         )}
 
@@ -1423,6 +1474,90 @@ function SettingsPage({
   );
 }
 
+const ORT_FIELDS: { key: keyof OrtRates; label: string }[] = [
+  { key: "weekdayEarlyPercent", label: "Werkdagen 06:00-07:30" },
+  { key: "weekdayEveningPercent", label: "Werkdagen 05:30-06:00 en 19:00-24:00" },
+  { key: "saturdayPercent", label: "Zaterdag 05:30-24:00" },
+  { key: "nightPercent", label: "Ma-za 00:00-05:30" },
+  { key: "sundayPercent", label: "Zondag vanaf 05:30" },
+  { key: "sundayNightPercent", label: "Zondag 00:00-05:30" },
+];
+
+function OrtSettingsPanel({ rates, onSave }: { rates: OrtRates; onSave: (rates: OrtRates) => Promise<void> }) {
+  const [draft, setDraft] = useState(rates);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => setDraft(rates), [rates]);
+
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setSaving(true);
+    setSaved(false);
+    try {
+      await onSave(normaliseOrtRates(draft));
+      setSaved(true);
+    } catch {
+      // De algemene foutmelding boven de pagina toont de serverfout.
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <section className="settings-group">
+      <div className="settings-group-heading">
+        <div>
+          <h3>ORT-percentages</h3>
+          <span>Geldt centraal voor alle loonberekeningen; de tijdvakken blijven ongewijzigd.</span>
+        </div>
+      </div>
+      <form className="ort-settings-form" onSubmit={(event) => void submit(event)}>
+        <div className="ort-settings-grid">
+          {ORT_FIELDS.map((field) => (
+            <label key={field.key}>
+              <span>{field.label}</span>
+              <span className="percentage-input">
+                <input
+                  aria-label={`${field.label} percentage`}
+                  type="number"
+                  min={0}
+                  max={500}
+                  step={1}
+                  value={draft[field.key]}
+                  onChange={(event) => {
+                    setSaved(false);
+                    setDraft((current) => ({ ...current, [field.key]: Number(event.target.value) }));
+                  }}
+                />
+                <span>%</span>
+              </span>
+            </label>
+          ))}
+        </div>
+        <div className="ort-settings-actions">
+          <button className="secondary-button" type="submit" disabled={saving}>
+            {saving ? <Loader2 className="spin" size={16} /> : <Save size={16} />}
+            {saving ? "Opslaan..." : "Opslaan"}
+          </button>
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={() => {
+              setDraft({ ...DEFAULT_ORT_RATES });
+              setSaved(false);
+            }}
+          >
+            <RotateCcw size={16} />
+            Standaard
+          </button>
+          {saved && <span className="settings-save-message">Opgeslagen voor alle clients.</span>}
+        </div>
+      </form>
+    </section>
+  );
+}
+
 function FileManagementTab({
   files,
   organization,
@@ -1435,6 +1570,7 @@ function FileManagementTab({
   onToggle,
   onMove,
   onMoveDivision,
+  onExpiryChange,
   onReparseFiles,
   onDelete,
 }: {
@@ -1449,6 +1585,7 @@ function FileManagementTab({
   onToggle: (file: StoredPdfFileSummary) => Promise<void>;
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onReparseFiles: () => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
@@ -1525,6 +1662,7 @@ function FileManagementTab({
         onToggle={onToggle}
         onMove={onMove}
         onMoveDivision={onMoveDivision}
+        onExpiryChange={onExpiryChange}
         onDelete={onDelete}
       />
     </div>
@@ -1538,6 +1676,7 @@ function FilesPage({
   onToggle,
   onMove,
   onMoveDivision,
+  onExpiryChange,
   onDelete,
 }: {
   files: StoredPdfFileSummary[];
@@ -1546,16 +1685,17 @@ function FilesPage({
   onToggle: (file: StoredPdfFileSummary) => Promise<void>;
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
-  if (isLoading) {
+  if (isLoading && files.length === 0) {
     return <LoadingState />;
   }
 
   const scheduledSegments = DAY_SEGMENTS.filter((segment) => segment.id !== "unassigned");
 
   return (
-    <section className="files-section">
+    <section className="files-section" aria-busy={isLoading}>
       <div className="section-heading">
         <div>
           <h2>Geuploade bestanden</h2>
@@ -1572,6 +1712,7 @@ function FilesPage({
           onToggle={onToggle}
           onMove={onMove}
           onMoveDivision={onMoveDivision}
+          onExpiryChange={onExpiryChange}
           onDelete={onDelete}
         />
         <FileStatusGroup
@@ -1582,6 +1723,7 @@ function FilesPage({
           onToggle={onToggle}
           onMove={onMove}
           onMoveDivision={onMoveDivision}
+          onExpiryChange={onExpiryChange}
           onDelete={onDelete}
         />
       </div>
@@ -1597,6 +1739,7 @@ type FileStatusGroupProps = {
   onToggle: (file: StoredPdfFileSummary) => Promise<void>;
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 };
 
@@ -1608,10 +1751,11 @@ function FileStatusGroup({
   onToggle,
   onMove,
   onMoveDivision,
+  onExpiryChange,
   onDelete,
 }: FileStatusGroupProps) {
   const [expandedConcessions, setExpandedConcessions] = useState<Record<string, boolean>>({});
-  const statusFiles = files.filter((file) => file.enabled === enabled);
+  const statusFiles = files.filter((file) => file.active === enabled);
   const knownDivisionIds = new Set(organization.divisions.map((division) => division.id));
   const hasUnassignedFiles = statusFiles.some((file) => !knownDivisionIds.has(file.divisionId));
   const concessionGroups = [
@@ -1732,6 +1876,7 @@ function FileStatusGroup({
                                     onToggle={onToggle}
                                     onMove={onMove}
                                     onMoveDivision={onMoveDivision}
+                                    onExpiryChange={onExpiryChange}
                                     onDelete={onDelete}
                                   />
                                 ))}
@@ -1755,6 +1900,7 @@ function FileStatusGroup({
                                   onToggle={onToggle}
                                   onMove={onMove}
                                   onMoveDivision={onMoveDivision}
+                                  onExpiryChange={onExpiryChange}
                                   onDelete={onDelete}
                                 />
                               ))}
@@ -1821,6 +1967,7 @@ function StoredFileCard({
   onToggle,
   onMove,
   onMoveDivision,
+  onExpiryChange,
   onDelete,
 }: {
   file: StoredPdfFileSummary;
@@ -1828,11 +1975,37 @@ function StoredFileCard({
   onToggle: (file: StoredPdfFileSummary) => Promise<void>;
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
+  onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
+  const expiryDetailsRef = useRef<HTMLDetailsElement | null>(null);
+  const [expiryDraft, setExpiryDraft] = useState(file.expiresOn ?? "");
+  const [isSavingExpiry, setIsSavingExpiry] = useState(false);
+  const isExpired = file.enabled && !file.active;
+  const expiryTitle = file.expiresOn
+    ? `${file.active ? "Actief tot en met" : "Verlopen op"} ${formatDate(file.expiresOn)}`
+    : "Verloopdatum instellen";
+
+  useEffect(() => setExpiryDraft(file.expiresOn ?? ""), [file.expiresOn]);
+
+  function closeExpiryEditor() {
+    setExpiryDraft(file.expiresOn ?? "");
+    expiryDetailsRef.current?.removeAttribute("open");
+  }
+
+  async function saveExpiry(expiresOn: string) {
+    setIsSavingExpiry(true);
+    try {
+      await onExpiryChange(file, expiresOn);
+      expiryDetailsRef.current?.removeAttribute("open");
+    } finally {
+      setIsSavingExpiry(false);
+    }
+  }
+
   return (
     <article
-      className={!file.enabled ? "file-card disabled" : "file-card"}
+      className={["file-card", !file.active ? "disabled" : "", file.enabled && !file.active ? "expired" : ""].filter(Boolean).join(" ")}
       draggable
       onDragStart={(event) => {
         event.dataTransfer.effectAllowed = "move";
@@ -1873,9 +2046,72 @@ function StoredFileCard({
         </div>
       </div>
       <div className="file-actions">
-        <button className="secondary-button" type="button" onClick={() => void onToggle(file)}>
-          {file.enabled ? <EyeOff size={16} /> : <Eye size={16} />}
-          {file.enabled ? "Uitzetten" : "Aanzetten"}
+        <details
+          ref={expiryDetailsRef}
+          className={file.expiresOn ? "file-expiry-control has-date" : "file-expiry-control"}
+          onToggle={(event) => {
+            if (event.currentTarget.open) {
+              setExpiryDraft(file.expiresOn ?? "");
+            }
+          }}
+        >
+          <summary className="icon-button" title={expiryTitle} aria-label={expiryTitle}>
+            <CalendarClock size={16} />
+          </summary>
+          <form
+            className="file-expiry-popover"
+            onSubmit={(event) => {
+              event.preventDefault();
+              if (expiryDraft) {
+                void saveExpiry(expiryDraft);
+              }
+            }}
+          >
+            <label>
+              <span>Verloopdatum</span>
+              <input
+                type="date"
+                value={expiryDraft}
+                onChange={(event) => setExpiryDraft(event.target.value)}
+              />
+            </label>
+            <small>Het pakket is actief tot en met deze datum.</small>
+            <div className="file-expiry-actions">
+              <button
+                className="secondary-button"
+                type="submit"
+                disabled={!expiryDraft || expiryDraft === (file.expiresOn ?? "") || isSavingExpiry}
+              >
+                {isSavingExpiry ? <Loader2 className="spin" size={14} /> : <Save size={14} />}
+                Bevestigen
+              </button>
+              <button className="secondary-button" type="button" disabled={isSavingExpiry} onClick={closeExpiryEditor}>
+                <RotateCcw size={14} />
+                Annuleren
+              </button>
+              {file.expiresOn && (
+                <button
+                  className="secondary-button danger"
+                  type="button"
+                  disabled={isSavingExpiry}
+                  onClick={() => void saveExpiry("")}
+                >
+                  <X size={14} />
+                  Datum wissen
+                </button>
+              )}
+            </div>
+          </form>
+        </details>
+        <button
+          className="secondary-button"
+          type="button"
+          disabled={isExpired}
+          title={isExpired ? "Verzet of wis de verloopdatum om dit pakket weer te activeren." : undefined}
+          onClick={() => void onToggle(file)}
+        >
+          {isExpired ? <CalendarClock size={16} /> : file.enabled ? <EyeOff size={16} /> : <Eye size={16} />}
+          {isExpired ? "Verlopen" : file.enabled ? "Uitzetten" : "Aanzetten"}
         </button>
         <button className="secondary-button danger" type="button" onClick={() => void onDelete(file)}>
           <Trash2 size={16} />
@@ -2064,6 +2300,7 @@ function DutyGuidance({
   isToday,
   selectedDate,
   wageSettings,
+  ortRates,
   personalEnabled,
 }: {
   services: Dienst[];
@@ -2082,6 +2319,7 @@ function DutyGuidance({
   isToday: boolean;
   selectedDate: string;
   wageSettings?: WageSettings;
+  ortRates: OrtRates;
   personalEnabled: boolean;
 }) {
   const serviceNumbers = [...new Set(services.map((service) => service.serviceNumber))].sort((a, b) => serviceSortKey(a) - serviceSortKey(b));
@@ -2114,7 +2352,7 @@ function DutyGuidance({
         ? "Dienst afgerond"
         : "Tussen twee acties";
   const wageEstimate = selectedService && wageSettings
-    ? calculateDutyWage(selectedService, serviceMovements, selectedDate, currentTime, wageSettings)
+    ? calculateDutyWage(selectedService, serviceMovements, selectedDate, currentTime, wageSettings, ortRates)
     : undefined;
 
   return (
@@ -2386,6 +2624,7 @@ function TimelineChart({
 }) {
   const frameRef = useRef<HTMLDivElement | null>(null);
   const scrollRef = useRef<HTMLDivElement | null>(null);
+  const axisTrackRef = useRef<HTMLDivElement | null>(null);
   const initialScrollKeyRef = useRef("");
   const pinchRef = useRef<{ startDistance: number; startHours: number; lastHours: number } | undefined>(undefined);
   const pinchAnchorRef = useRef<{ minute: number; viewportX: number } | undefined>(undefined);
@@ -2507,6 +2746,9 @@ function TimelineChart({
       0,
       loopColumnWidth + (anchor.minute - range.start) * minuteWidth - anchor.viewportX,
     );
+    if (axisTrackRef.current) {
+      axisTrackRef.current.style.transform = `translateX(-${scroll.scrollLeft}px)`;
+    }
   }, [frameHours, loopColumnWidth, minuteWidth, range.start]);
 
   useEffect(() => {
@@ -2541,6 +2783,9 @@ function TimelineChart({
     initialScrollKeyRef.current = scrollKey;
     const currentPosition = loopColumnWidth + (currentTimelineMinute - range.start) * minuteWidth;
     scroll.scrollLeft = Math.max(0, currentPosition - scroll.clientWidth * 0.42);
+    if (axisTrackRef.current) {
+      axisTrackRef.current.style.transform = `translateX(-${scroll.scrollLeft}px)`;
+    }
   }, [currentTimelineMinute, frameHours, frameWidth, loopColumnWidth, minuteWidth, range.end, range.start]);
 
   return (
@@ -2566,16 +2811,17 @@ function TimelineChart({
         className="timeline-frame"
         style={{ width: "100%" }}
       >
-        <div className="timeline-scroll" ref={scrollRef}>
-          <div
-            className="timeline-grid"
-            style={{
-              width: `${contentWidth + loopColumnWidth}px`,
-              gridTemplateColumns: `${loopColumnWidth}px ${contentWidth}px`,
-            }}
-          >
-            <div className="timeline-corner"><span>Omloopnummer</span></div>
-            <div className="time-axis" style={{ width: `${contentWidth}px`, backgroundSize: `${hourWidth}px 100%` }}>
+        <div
+          className="timeline-sticky-axis"
+          style={{ gridTemplateColumns: `${loopColumnWidth}px minmax(0, 1fr)` }}
+        >
+          <div className="timeline-corner"><span>Omloopnummer</span></div>
+          <div className="time-axis-viewport">
+            <div
+              ref={axisTrackRef}
+              className="time-axis"
+              style={{ width: `${contentWidth}px`, backgroundSize: `${hourWidth}px 100%` }}
+            >
               {ticks.map((tick, index) => (
                 <div className="time-tick" key={tick.minute} style={{ left: `${(tick.minute - range.start) * minuteWidth}px` }}>
                   {index % labelInterval === 0 && <span>{formatMinute(tick.minute)}</span>}
@@ -2585,7 +2831,24 @@ function TimelineChart({
                 <div className="live-now-marker axis-marker" style={{ left: `${(currentTimelineMinute - range.start) * minuteWidth}px` }} />
               )}
             </div>
-
+          </div>
+        </div>
+        <div
+          className="timeline-scroll"
+          ref={scrollRef}
+          onScroll={(event) => {
+            if (axisTrackRef.current) {
+              axisTrackRef.current.style.transform = `translateX(-${event.currentTarget.scrollLeft}px)`;
+            }
+          }}
+        >
+          <div
+            className="timeline-grid"
+            style={{
+              width: `${contentWidth + loopColumnWidth}px`,
+              gridTemplateColumns: `${loopColumnWidth}px ${contentWidth}px`,
+            }}
+          >
             {loops.map((loop) => (
               <TimelineRow
                 key={loop}
@@ -3872,6 +4135,13 @@ function formatDateTime(value: number): string {
     dateStyle: "short",
     timeStyle: "short",
   }).format(new Date(value));
+}
+
+function formatDate(value: string): string {
+  const date = new Date(`${value}T12:00:00`);
+  return Number.isNaN(date.getTime())
+    ? value
+    : new Intl.DateTimeFormat("nl-NL", { dateStyle: "medium" }).format(date);
 }
 
 export default App;

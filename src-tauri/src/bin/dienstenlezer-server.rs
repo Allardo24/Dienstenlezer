@@ -33,7 +33,7 @@ use tower_http::{
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
-const STORAGE_SCHEMA_VERSION: u8 = 3;
+const STORAGE_SCHEMA_VERSION: u8 = 4;
 const DAY_SEGMENTS: [&str; 4] = ["weekday", "saturday", "sunday", "unassigned"];
 const LEGACY_DEFAULT_ID: &str = "standaard";
 
@@ -105,6 +105,27 @@ struct OrganizationConfig {
 #[serde(rename_all = "camelCase")]
 struct AdminSettings {
     busless_actions: Vec<String>,
+    #[serde(default = "default_ort_rates")]
+    ort_rates: OrtRates,
+}
+
+#[derive(Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OrtRates {
+    weekday_early_percent: u16,
+    weekday_evening_percent: u16,
+    saturday_percent: u16,
+    night_percent: u16,
+    sunday_percent: u16,
+    sunday_night_percent: u16,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdminSettingsInput {
+    busless_actions: Vec<String>,
+    #[serde(default)]
+    ort_rates: Option<OrtRates>,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -116,6 +137,8 @@ struct StoredFileRecord {
     last_modified: i64,
     uploaded_at: i64,
     enabled: bool,
+    #[serde(default)]
+    expires_on: Option<String>,
     day_segment: String,
     #[serde(default = "default_division_id")]
     division_id: String,
@@ -133,6 +156,8 @@ struct StoredFileSummary {
     last_modified: i64,
     uploaded_at: i64,
     enabled: bool,
+    active: bool,
+    expires_on: Option<String>,
     day_segment: String,
     division_id: String,
     content_hash: Option<String>,
@@ -167,6 +192,7 @@ struct ScheduleResponse {
 #[serde(rename_all = "camelCase")]
 struct StoredFilePatch {
     enabled: Option<bool>,
+    expires_on: Option<String>,
     day_segment: Option<String>,
     division_id: Option<String>,
     parse_result: Option<Value>,
@@ -395,7 +421,7 @@ async fn schedule(
         results: records
             .iter()
             .filter(|record| {
-                record.enabled
+                record_is_active(record)
                     && record.day_segment == segment
                     && division_ids.contains(&record.division_id)
             })
@@ -893,6 +919,7 @@ async fn upload_file(
     let mut record =
         record.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Bestandsmetadata ontbreekt."))?;
     validate_segment(&record.day_segment)?;
+    record.expires_on = normalize_expiry(record.expires_on.as_deref())?;
     validate_division_exists(&record.division_id, &*state.organization.read().await)?;
     validate_parse_result(&record.parse_result)?;
     let pdf = pdf.ok_or_else(|| api_error(StatusCode::BAD_REQUEST, "Pdf-bestand ontbreekt."))?;
@@ -944,6 +971,9 @@ async fn update_file(
         .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Bestand niet gevonden."))?;
     if let Some(enabled) = patch.enabled {
         record.enabled = enabled;
+    }
+    if let Some(expires_on) = patch.expires_on {
+        record.expires_on = normalize_expiry(Some(&expires_on))?;
     }
     if let Some(day_segment) = patch.day_segment {
         record.day_segment = day_segment;
@@ -1037,9 +1067,14 @@ async fn update_organization(
 async fn update_admin_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(settings): Json<AdminSettings>,
+    Json(input): Json<AdminSettingsInput>,
 ) -> Result<Json<AdminSettings>, (StatusCode, Json<ApiError>)> {
     require_admin(&state, &headers).await?;
+    let current_ort_rates = state.settings.read().await.ort_rates.clone();
+    let settings = AdminSettings {
+        busless_actions: input.busless_actions,
+        ort_rates: input.ort_rates.unwrap_or(current_ort_rates),
+    };
     let settings = normalize_admin_settings(settings)?;
     write_json(&state.settings_path, &settings).await?;
     *state.settings.write().await = settings.clone();
@@ -1096,6 +1131,29 @@ fn default_division_id() -> String {
     String::new()
 }
 
+fn normalize_expiry(value: Option<&str>) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
+    let value = value.map(str::trim).filter(|value| !value.is_empty());
+    let Some(value) = value else {
+        return Ok(None);
+    };
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map_err(|_| bad_request("De verloopdatum moet een geldige datum zijn."))?;
+    Ok(Some(value.to_owned()))
+}
+
+fn record_is_active(record: &StoredFileRecord) -> bool {
+    record_is_active_on(record, Local::now().date_naive())
+}
+
+fn record_is_active_on(record: &StoredFileRecord, today: NaiveDate) -> bool {
+    record.enabled
+        && record
+            .expires_on
+            .as_deref()
+            .and_then(|value| NaiveDate::parse_from_str(value, "%Y-%m-%d").ok())
+            .map_or(true, |expires_on| expires_on >= today)
+}
+
 fn default_organization() -> OrganizationConfig {
     OrganizationConfig {
         concessions: Vec::new(),
@@ -1111,6 +1169,18 @@ fn default_admin_settings() -> AdminSettings {
             "Prep-in".to_owned(),
             "Rijklaarmaken".to_owned(),
         ],
+        ort_rates: default_ort_rates(),
+    }
+}
+
+fn default_ort_rates() -> OrtRates {
+    OrtRates {
+        weekday_early_percent: 15,
+        weekday_evening_percent: 30,
+        saturday_percent: 30,
+        night_percent: 40,
+        sunday_percent: 45,
+        sunday_night_percent: 55,
     }
 }
 
@@ -1140,7 +1210,24 @@ fn normalize_admin_settings(
         }
     }
 
-    Ok(AdminSettings { busless_actions })
+    let percentages = [
+        settings.ort_rates.weekday_early_percent,
+        settings.ort_rates.weekday_evening_percent,
+        settings.ort_rates.saturday_percent,
+        settings.ort_rates.night_percent,
+        settings.ort_rates.sunday_percent,
+        settings.ort_rates.sunday_night_percent,
+    ];
+    if percentages.iter().any(|percentage| *percentage > 500) {
+        return Err(bad_request(
+            "Een ORT-percentage moet tussen 0 en 500 liggen.",
+        ));
+    }
+
+    Ok(AdminSettings {
+        busless_actions,
+        ort_rates: settings.ort_rates,
+    })
 }
 
 async fn migrate_legacy_default(
@@ -1191,6 +1278,8 @@ fn file_summary(record: &StoredFileRecord) -> StoredFileSummary {
         last_modified: record.last_modified,
         uploaded_at: record.uploaded_at,
         enabled: record.enabled,
+        active: record_is_active(record),
+        expires_on: record.expires_on.clone(),
         day_segment: record.day_segment.clone(),
         division_id: record.division_id.clone(),
         content_hash: record.content_hash.clone(),
@@ -1218,7 +1307,7 @@ fn catalog_revision(
 fn segment_revision(records: &[StoredFileRecord], segment: &str) -> String {
     let division_ids = records
         .iter()
-        .filter(|record| record.enabled && record.day_segment == segment)
+        .filter(|record| record_is_active(record) && record.day_segment == segment)
         .map(|record| record.division_id.clone())
         .collect::<BTreeSet<_>>();
     schedule_revision(records, segment, &division_ids)
@@ -1235,7 +1324,7 @@ fn schedule_revision(
         hasher.update(division_id.as_bytes());
     }
     for record in records.iter().filter(|record| {
-        record.enabled
+        record_is_active(record)
             && record.day_segment == segment
             && division_ids.contains(&record.division_id)
     }) {
@@ -1441,7 +1530,7 @@ fn live_requests_for_records(
     records
         .iter()
         .filter(|record| {
-            record.enabled
+            record_is_active(record)
                 && record.day_segment == segment
                 && division_ids.contains(&record.division_id)
         })
@@ -1657,6 +1746,7 @@ mod tests {
             last_modified: 10,
             uploaded_at: 20,
             enabled,
+            expires_on: None,
             day_segment: segment.to_owned(),
             division_id: String::new(),
             content_hash: Some("abc".to_owned()),
@@ -1782,8 +1872,29 @@ mod tests {
                 String::new(),
                 "REIS".to_owned(),
             ],
+            ort_rates: default_ort_rates(),
         })
         .unwrap();
         assert_eq!(settings.busless_actions, vec!["Rij mee", "REIS"]);
+    }
+
+    #[test]
+    fn expiry_is_active_through_the_selected_date() {
+        let mut expiring = record("weekday", true);
+        expiring.expires_on = Some("2026-09-18".to_owned());
+        assert!(record_is_active_on(
+            &expiring,
+            NaiveDate::from_ymd_opt(2026, 9, 18).unwrap()
+        ));
+        assert!(!record_is_active_on(
+            &expiring,
+            NaiveDate::from_ymd_opt(2026, 9, 19).unwrap()
+        ));
+    }
+
+    #[test]
+    fn invalid_expiry_is_rejected() {
+        assert!(normalize_expiry(Some("2026-02-31")).is_err());
+        assert_eq!(normalize_expiry(Some("  ")).unwrap(), None);
     }
 }

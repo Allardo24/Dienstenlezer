@@ -27,13 +27,15 @@ for (const value of ["__VERSION__", "__IMAGE_LINE__"]) {
 }
 for (const value of [
   "aarch64",
-  "amd64",
   '"8080/tcp": 8080',
   "ingress: true",
   "ingress_port: 8080",
   "ingress_stream: true",
 ]) {
   if (!config.includes(value)) throw new Error(`Ontbrekende add-oninstelling: ${value}`);
+}
+if (config.includes("amd64")) {
+  throw new Error("AMD64 hoort niet in het ARM64-only add-onpakket.");
 }
 
 const dockerfile = await readFile(resolve(outputApp, "Dockerfile"), "utf8");

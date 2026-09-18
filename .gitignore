@@ -6,5 +6,6 @@ server-data/
 vite-dev*.log
 .tmp-web-build/
 .tmp-auth-*/
+.tmp-runtime-*/
 artifacts/
 deploy/home-assistant/published-repository/

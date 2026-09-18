@@ -17,12 +17,13 @@ import {
 import {
   normaliseBuslessActions,
 } from "./buslessActions";
+import { normaliseOrtRates } from "./wage/rules";
 
 const CACHE_DB_NAME = "dienstenlezer-server-cache";
 const CACHE_DB_VERSION = 2;
 const CATALOG_STORE = "catalog";
 const SCHEDULE_STORE = "schedules";
-const STORAGE_SCHEMA_VERSION = 3;
+const STORAGE_SCHEMA_VERSION = 4;
 
 async function serverRequest(path: string, init?: RequestInit): Promise<Response> {
   const response = await fetchWithRetry(serverUrl(path), withAuth(init));
@@ -156,6 +157,7 @@ export async function saveStoredPdfFile(file: StoredPdfFile): Promise<void> {
     lastModified: file.lastModified,
     uploadedAt: file.uploadedAt,
     enabled: file.enabled,
+    expiresOn: file.expiresOn,
     daySegment: file.daySegment,
     divisionId: file.divisionId,
     contentHash: file.contentHash,
@@ -177,6 +179,10 @@ export async function updateStoredPdfFileDaySegment(id: string, daySegment: DayS
 
 export async function updateStoredPdfFileDivision(id: string, divisionId: string): Promise<void> {
   await updateServerFile(id, { divisionId });
+}
+
+export async function updateStoredPdfFileExpiry(id: string, expiresOn: string): Promise<void> {
+  await updateServerFile(id, { expiresOn });
 }
 
 export async function reparseStoredPdfFiles(
@@ -231,6 +237,7 @@ export async function saveOrganizationConfig(config: OrganizationConfig): Promis
 export async function saveAdminSettings(settings: AdminSettings): Promise<AdminSettings> {
   const normalized = {
     buslessActions: normaliseBuslessActions(settings.buslessActions),
+    ortRates: normaliseOrtRates(settings.ortRates),
   };
   const response = await serverRequest("/api/settings", {
     method: "PUT",
@@ -240,6 +247,7 @@ export async function saveAdminSettings(settings: AdminSettings): Promise<AdminS
   const saved = await response.json() as AdminSettings;
   return {
     buslessActions: normaliseBuslessActions(saved.buslessActions),
+    ortRates: normaliseOrtRates(saved.ortRates),
   };
 }
 
@@ -249,7 +257,13 @@ export async function deleteStoredPdfFile(id: string): Promise<void> {
 
 async function updateServerFile(
   id: string,
-  patch: { enabled?: boolean; daySegment?: DaySegment; divisionId?: string; parseResult?: StoredPdfFile["parseResult"] },
+  patch: {
+    enabled?: boolean;
+    expiresOn?: string;
+    daySegment?: DaySegment;
+    divisionId?: string;
+    parseResult?: StoredPdfFile["parseResult"];
+  },
 ): Promise<void> {
   await serverRequest(`/api/files/${encodeURIComponent(id)}`, {
     method: "PATCH",

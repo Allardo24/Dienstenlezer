@@ -73,6 +73,16 @@ export type OrganizationConfig = {
 
 export type AdminSettings = {
   buslessActions: string[];
+  ortRates: OrtRates;
+};
+
+export type OrtRates = {
+  weekdayEarlyPercent: number;
+  weekdayEveningPercent: number;
+  saturdayPercent: number;
+  nightPercent: number;
+  sundayPercent: number;
+  sundayNightPercent: number;
 };
 
 export type StoredPdfFile = {
@@ -82,6 +92,7 @@ export type StoredPdfFile = {
   lastModified: number;
   uploadedAt: number;
   enabled: boolean;
+  expiresOn?: string;
   daySegment: DaySegment;
   divisionId: string;
   contentHash?: string;
@@ -90,6 +101,7 @@ export type StoredPdfFile = {
 };
 
 export type StoredPdfFileSummary = Omit<StoredPdfFile, "file" | "parseResult"> & {
+  active: boolean;
   serviceCount: number;
   movementCount: number;
 };

@@ -1,5 +1,6 @@
 import type { Dienst, Movement } from "../types";
-import { irregularHoursPercent } from "./rules";
+import type { OrtRates } from "../types";
+import { DEFAULT_ORT_RATES, irregularHoursPercent } from "./rules";
 import type { WageEstimate, WageSettings } from "./types";
 
 type MinuteRange = { start: number; end: number };
@@ -10,6 +11,7 @@ export function calculateDutyWage(
   serviceDate: string,
   currentTime: Date,
   settings: WageSettings,
+  ortRates: OrtRates = DEFAULT_ORT_RATES,
 ): WageEstimate | undefined {
   if (settings.hourlyRateCents <= 0) {
     return undefined;
@@ -47,7 +49,7 @@ export function calculateDutyWage(
       continue;
     }
     const at = new Date(dateStart.getTime() + minute * 60_000);
-    const minuteUnits = settings.hourlyRateCents * (100 + irregularHoursPercent(at, dutyStartedOnSunday));
+    const minuteUnits = settings.hourlyRateCents * (100 + irregularHoursPercent(at, dutyStartedOnSunday, ortRates));
     totalUnits += minuteUnits;
     totalPaidMinutes += 1;
     if (minute < elapsedEnd) {

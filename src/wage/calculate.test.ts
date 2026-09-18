@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { Dienst, Movement } from "../types";
 import { calculateDutyWage } from "./calculate";
-import { irregularHoursPercent } from "./rules";
+import { DEFAULT_ORT_RATES, irregularHoursPercent } from "./rules";
 
 const service: Dienst = {
   id: "service-1",
@@ -42,6 +42,12 @@ describe("irregularHoursPercent", () => {
     expect(irregularHoursPercent(new Date(2026, 7, 9, 5, 29), false)).toBe(55);
     expect(irregularHoursPercent(new Date(2026, 7, 9, 5, 30), false)).toBe(45);
     expect(irregularHoursPercent(new Date(2026, 7, 10, 2, 0), true)).toBe(45);
+  });
+
+  it("gebruikt de centraal ingestelde percentages", () => {
+    const rates = { ...DEFAULT_ORT_RATES, weekdayEarlyPercent: 22, sundayNightPercent: 61 };
+    expect(irregularHoursPercent(new Date(2026, 7, 10, 6, 30), false, rates)).toBe(22);
+    expect(irregularHoursPercent(new Date(2026, 7, 9, 3, 0), false, rates)).toBe(61);
   });
 });
 

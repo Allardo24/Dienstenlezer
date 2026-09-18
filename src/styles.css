@@ -1356,6 +1356,44 @@ h2 {
   gap: 8px;
 }
 
+.ort-settings-form {
+  display: grid;
+  gap: 12px;
+}
+
+.ort-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px 12px;
+}
+
+.ort-settings-grid label {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 86px;
+  align-items: center;
+  gap: 10px;
+  color: #385461;
+  font-size: 0.78rem;
+  font-weight: 750;
+}
+
+.ort-settings-grid .percentage-input {
+  min-height: 34px;
+}
+
+.ort-settings-grid .percentage-input input {
+  height: 32px;
+  padding-left: 8px;
+  font-size: 0.86rem;
+}
+
+.ort-settings-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .settings-note,
 .settings-save-message {
   margin: 10px 0 0;
@@ -1866,6 +1904,24 @@ h2 {
   border-right: 1px solid #d7e2ea;
 }
 
+.timeline-sticky-axis {
+  position: sticky;
+  top: 0;
+  z-index: 12;
+  display: grid;
+  min-height: 46px;
+  overflow: hidden;
+  border-top: 1px solid #d7e2ea;
+  background: #f1f7fa;
+  box-shadow: 0 2px 4px rgba(24, 57, 70, 0.1);
+}
+
+.time-axis-viewport {
+  min-width: 0;
+  overflow: hidden;
+  border-bottom: 1px solid #d7e2ea;
+}
+
 .timeline-scroll {
   overflow: auto;
   touch-action: pan-x pan-y;
@@ -1887,10 +1943,7 @@ h2 {
 
 .timeline-corner,
 .time-axis {
-  position: sticky;
-  top: 0;
-  z-index: 4;
-  min-height: 58px;
+  min-height: 46px;
   background: #f1f7fa;
 }
 
@@ -1904,13 +1957,14 @@ h2 {
 .timeline-corner {
   display: flex;
   align-items: center;
-  padding: 12px 14px;
+  padding: 8px 14px;
   color: #0d3a48;
   font-weight: 800;
 }
 
 .time-axis {
   position: relative;
+  will-change: transform;
   background:
     linear-gradient(to right, rgba(22, 80, 96, 0.16) 1px, transparent 1px) 0 0 / 180px 100%,
     #f1f7fa;
@@ -1926,7 +1980,7 @@ h2 {
 
 .time-tick span {
   position: absolute;
-  top: 10px;
+  top: 8px;
   left: 8px;
   color: #315062;
   font-size: 0.82rem;
@@ -2384,6 +2438,7 @@ tbody tr:hover {
 }
 
 .file-card {
+  position: relative;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -2402,6 +2457,10 @@ tbody tr:hover {
 .file-card.disabled {
   background: #f6f8fa;
   opacity: 0.72;
+}
+
+.file-card.expired {
+  border-style: dashed;
 }
 
 .file-card strong,
@@ -2470,6 +2529,71 @@ tbody tr:hover {
   gap: 8px;
   flex-wrap: wrap;
   justify-content: flex-end;
+}
+
+.file-expiry-control {
+  position: relative;
+}
+
+.file-expiry-control > summary {
+  list-style: none;
+}
+
+.file-expiry-control > summary::-webkit-details-marker {
+  display: none;
+}
+
+.file-expiry-control.has-date > summary {
+  border-color: #168299;
+  color: #075e70;
+  background: #e9f9fb;
+}
+
+.file-expiry-popover {
+  display: grid;
+  gap: 5px;
+  width: 230px;
+  max-width: 100%;
+  margin-top: 6px;
+  padding: 10px;
+  border: 1px solid #b7c8d8;
+  border-radius: 7px;
+  background: #f8fbfc;
+}
+
+.file-expiry-popover label {
+  display: grid;
+  gap: 5px;
+  color: #385461;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.file-expiry-popover input {
+  min-height: 34px;
+  padding: 0 8px;
+  border: 1px solid #b7c8d8;
+  border-radius: 6px;
+  color: #17343f;
+  font: inherit;
+}
+
+.file-expiry-popover small {
+  margin: 0;
+  line-height: 1.35;
+}
+
+.file-expiry-actions {
+  display: flex;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 3px;
+}
+
+.file-expiry-actions .secondary-button {
+  min-height: 30px;
+  padding: 0 7px;
+  font-size: 0.72rem;
 }
 
 .file-status-groups {
@@ -3809,6 +3933,14 @@ tbody tr:hover {
 
   .wage-settings-actions {
     grid-column: auto;
+  }
+
+  .ort-settings-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .ort-settings-grid label {
+    grid-template-columns: minmax(0, 1fr) 82px;
   }
 
   .settings-add-action > div {

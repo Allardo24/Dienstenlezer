@@ -1522,7 +1522,10 @@ mod tests {
         assert_eq!(sanitized_material_type(Some("Bus aan lader")), None);
         assert_eq!(sanitized_material_type(Some("Bus naar lader 1F")), None);
         assert_eq!(sanitized_material_type(Some("Bus van 1H")), None);
-        assert_eq!(sanitized_material_type(Some("Bus staat voor pantograaf 3B")), None);
+        assert_eq!(
+            sanitized_material_type(Some("Bus staat voor pantograaf 3B")),
+            None
+        );
         assert_eq!(
             sanitized_material_type(Some("Yutong 15m R-NET")),
             Some("Yutong 15m R-NET")

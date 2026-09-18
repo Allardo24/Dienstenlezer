@@ -60,7 +60,7 @@ Werkt de Home Assistant-versie niet goed, zet dan alleen de Cloudflared-host ter
 
 ## Vooraf gebouwde updates
 
-De workflow `.github/workflows/publish-ha-image.yml` bouwt later automatisch `aarch64` en `amd64` voor GitHub Container Registry. Daarvoor is een GitHub-repository nodig.
+De workflow `.github/workflows/publish-ha-image.yml` bouwt automatisch alleen `aarch64` voor de Raspberry Pi 4 en publiceert die image naar GitHub Container Registry. Daarvoor is een GitHub-repository nodig.
 
 Na het aanmaken van die repository:
 
