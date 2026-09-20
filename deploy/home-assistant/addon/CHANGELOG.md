@@ -1,5 +1,11 @@
 # Wijzigingen
 
+## 1.4.7
+
+- een paar verbetering voor de backend
+- grote titelheader verwijderd
+- onnodige ui elementen verwijderd
+
 ## 1.4.6
 
 - Dienstenpakketten kunnen vanaf nu een verloopdatum hebben

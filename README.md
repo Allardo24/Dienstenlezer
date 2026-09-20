@@ -79,6 +79,19 @@ Start daarna `src-tauri/target/release/dienstenlezer-server` vanuit de projectma
 - `DIENSTENLEZER_DATA_DIR`: blijvende datamap, standaard `server-data`.
 - `DIENSTENLEZER_WEB_DIR`: map met de webbuild, standaard `dist`.
 
+## Algemene clientinstellingen
+
+In `src/appConfig.ts` staan de timing van overnamemeldingen, live-verversing,
+browsercache, standaard tijdlijnweergave en het aantal gereden diensten per pagina.
+De waarden hebben korte toelichtingen en expliciete tijdseenheden. Bijvoorbeeld:
+`takeover.alertBeforeDepartureMinutes: 15` toont de overnamemelding vanaf 15 minuten
+voor vertrek. Dit bestand bevat geen wachtwoorden of persoonlijke instellingen.
+
+Na aanpassen opnieuw bouwen met `npm run build`; voor Home Assistant opnieuw
+publiceren via de bestaande publiceerbatch. De servercache en het tempo van de
+externe livefeed veranderen niet mee met het verversinterval van de client.
+ORT-percentages blijven via Serverinstellingen aanpasbaar.
+
 ## Controles
 
 ```powershell

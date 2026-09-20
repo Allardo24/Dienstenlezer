@@ -1,3 +1,5 @@
+import { appConfig } from "./appConfig";
+
 export type TakeoverPhase = "no-data" | "expected" | "arrived" | "departed";
 export type TakeoverTone = "neutral" | "on-time" | "early" | "late" | "roomy";
 
@@ -48,7 +50,7 @@ export function resolveTakeoverArrivalMinute({
   plannedArrivalMinute,
   delaySeconds,
   predictedArrivalMinute,
-  toleranceMinutes = 15,
+  toleranceMinutes = appConfig.takeover.arrivalPredictionToleranceMinutes,
 }: {
   plannedArrivalMinute: number;
   delaySeconds: number;
@@ -77,7 +79,7 @@ export function resolveTakeoverPlannedMinute({
   suppliedPlannedMinute,
   expectedArrivalMinute,
   delaySeconds,
-  toleranceMinutes = 1.5,
+  toleranceMinutes = appConfig.takeover.plannedArrivalToleranceMinutes,
 }: {
   suppliedPlannedMinute: number;
   expectedArrivalMinute: number;
@@ -109,10 +111,10 @@ export function calculateTakeoverStatus({
 }): TakeoverStatus {
   const minutesToDeparture = Math.ceil(plannedDepartureMinute - expectedArrivalMinute);
   const minutesUntilDeparture = Math.ceil(plannedDepartureMinute - currentMinute);
-  const delayed = delaySeconds > 60;
-  const early = delaySeconds < -60;
-  const roomy = delayed && minutesToDeparture > 7;
-  const risky = delayed && minutesToDeparture <= 7;
+  const delayed = delaySeconds > appConfig.takeover.delayThresholdSeconds;
+  const early = delaySeconds < -appConfig.takeover.delayThresholdSeconds;
+  const roomy = delayed && minutesToDeparture > appConfig.takeover.sufficientTransferMinutes;
+  const risky = delayed && minutesToDeparture <= appConfig.takeover.sufficientTransferMinutes;
   const phase: TakeoverPhase = departed
     ? "departed"
     : arrived
@@ -151,7 +153,7 @@ export function calculateTakeoverStatus({
     minutesUntilDeparture,
     shouldShowTopAlert: hasLiveData
       && phase !== "departed"
-      && minutesUntilDeparture <= 10
+      && minutesUntilDeparture <= appConfig.takeover.alertBeforeDepartureMinutes
       && !roomy,
   };
 }

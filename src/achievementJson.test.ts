@@ -11,6 +11,22 @@ const metric = (name: "dutyCount" | "pauseMinutes"): AchievementCondition => ({
 });
 
 describe("achievement JSON", () => {
+  it.each([undefined, null, "", "   "])("accepteert een regel zonder divisiefilter (%s)", (divisionId) => {
+    const input = parseAchievementJson(JSON.stringify({
+      id: "algemeen", title: "Algemeen", description: "Tien diensten", badge: "10", enabled: false,
+      condition: { kind: "metric", metric: "dutyCount", divisionId, comparison: "gte", value: 10 },
+    }));
+    expect(input.condition).toEqual({ kind: "metric", metric: "dutyCount", lines: [], comparison: "gte", value: 10 });
+  });
+
+  it("behoudt een expliciet divisiefilter en blijft verplichte lijnselecties controleren", () => {
+    const input = { id: "gericht", title: "Gericht", description: "Tien diensten", badge: "10", enabled: false,
+      condition: { kind: "metric", metric: "dutyCount", divisionId: "lkn", comparison: "gte", value: 10 } };
+    expect(parseAchievementJson(JSON.stringify(input)).condition).toMatchObject({ divisionId: "lkn" });
+    expect(() => parseAchievementJson(JSON.stringify({ ...input, condition: { ...input.condition, metric: "fullDutyLines" } })))
+      .toThrow("minimaal één lijn");
+  });
+
   it("leest geneste EN- en OF-groepen zonder vertaallaag", () => {
     const input = parseAchievementJson(JSON.stringify({
       id: "complex",

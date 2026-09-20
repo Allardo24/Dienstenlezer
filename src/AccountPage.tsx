@@ -166,6 +166,8 @@ function SignedInAccount({
         </button>
       </div>
 
+      <PersonalDataPanel />
+
       <div className="account-grid account-security-grid">
         <section className="account-card">
           <h3>Wachtwoord</h3>
@@ -182,8 +184,6 @@ function SignedInAccount({
         </section>
 
       </div>
-
-      <PersonalDataPanel />
 
     </section>
   );

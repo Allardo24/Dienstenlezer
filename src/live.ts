@@ -1,11 +1,12 @@
 import type { LiveMovementRequest, LiveStatusResponse } from "./types";
 import { serverUrl } from "./serverUrl";
 import { fetchWithRetry } from "./fetchRetry";
+import { appConfig } from "./appConfig";
 
 const webLiveEtags = new Map<string, string>();
 const webLiveResponses = new Map<string, LiveStatusResponse>();
 const LIVE_CACHE_PREFIX = "dienstenlezer-live-v1:";
-const LIVE_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const LIVE_CACHE_MAX_AGE_MS = appConfig.live.browserCacheHours * 60 * 60 * 1000;
 
 type StoredLiveResponse = {
   savedAt: number;

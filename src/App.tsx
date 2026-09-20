@@ -25,6 +25,7 @@ import {
   X,
 } from "lucide-react";
 import packageJson from "../package.json";
+import { appConfig } from "./appConfig";
 import AccountPage, { AccountManagement } from "./AccountPage";
 import { AchievementManagement } from "./PersonalDataPanel";
 import DutyConfirmation from "./DutyConfirmation";
@@ -86,8 +87,8 @@ import type {
 } from "./types";
 
 const EMPTY_RESULTS: ParseResult[] = [];
-const DESKTOP_LOOP_COLUMN_WIDTH = 170;
-const MOBILE_LOOP_COLUMN_WIDTH = 84;
+const DESKTOP_LOOP_COLUMN_WIDTH = appConfig.timeline.desktopLoopColumnWidth;
+const MOBILE_LOOP_COLUMN_WIDTH = appConfig.timeline.mobileLoopColumnWidth;
 const GUIDANCE_LOCK_KEY = "dienstenlezer-locked-guidance-service";
 const SELECTED_DIVISIONS_KEY = "dienstenlezer-selected-divisions-v1";
 const APP_VERSION = packageJson.version;
@@ -178,7 +179,7 @@ function App() {
   const [isParsing, setIsParsing] = useState(false);
   const [includeNoLoop, setIncludeNoLoop] = useState(true);
   const [showDetails, setShowDetails] = useState(false);
-  const [frameHours, setFrameHours] = useState(6);
+  const [frameHours, setFrameHours] = useState(appConfig.timeline.defaultHours);
   const [query, setQuery] = useState("");
   const [storageError, setStorageError] = useState<string | undefined>();
   const [guidanceServiceNumber, setGuidanceServiceNumber] = useState(() => readLockedGuidanceService() ?? "");
@@ -419,7 +420,7 @@ function App() {
               message: "Geen ritten binnen twee uur voor of na nu beschikbaar voor Qbuzz-live.",
             },
           });
-          timer = window.setTimeout(() => void refreshLiveStatuses(), 30_000);
+          timer = window.setTimeout(() => void refreshLiveStatuses(), appConfig.live.refreshIntervalSeconds * 1000);
           return;
         }
 
@@ -436,7 +437,7 @@ function App() {
         const response = await getQbuzzLiveStatuses(selectedDate, requestMovements, selectedDivisionIds);
         if (!cancelled) {
           setLiveResponse(response);
-          timer = window.setTimeout(() => void refreshLiveStatuses(), 30_000);
+          timer = window.setTimeout(() => void refreshLiveStatuses(), appConfig.live.refreshIntervalSeconds * 1000);
         }
       } catch (error) {
         if (!cancelled) {
@@ -448,7 +449,7 @@ function App() {
               message: liveErrorMessage(error),
             },
           }));
-          timer = window.setTimeout(() => void refreshLiveStatuses(), 30_000);
+          timer = window.setTimeout(() => void refreshLiveStatuses(), appConfig.live.refreshIntervalSeconds * 1000);
         }
       }
     }
@@ -582,11 +583,6 @@ function App() {
     }
   }
 
-  function resetView() {
-    setQuery("");
-    setIncludeNoLoop(true);
-  }
-
   function updateGuidanceLock(locked: boolean) {
     const serviceNumber = guidanceServiceNumber.trim();
     if (locked && serviceNumber) {
@@ -701,7 +697,6 @@ function App() {
             DienstenLezer
             <span className="app-version" title={`DienstenLezer versie ${APP_VERSION}`}>v{APP_VERSION}</span>
           </p>
-          <h1>Omlopen uit diensten-pdf's</h1>
         </div>
         <div className="topbar-actions">
           <label className="top-date">
@@ -727,9 +722,6 @@ function App() {
               <UserRound size={19} />
             </button>
           )}
-          <button className="icon-button danger" type="button" onClick={resetView} disabled={!query && includeNoLoop} title="Filters leegmaken">
-            <X size={19} />
-          </button>
         </div>
       </section>
 
@@ -2221,7 +2213,7 @@ type GuidanceTakeoverDisplay = ReturnType<typeof calculateTakeoverStatus> & {
   vehicleId?: string;
 };
 
-const LIVE_STALE_AFTER_SECONDS = 90;
+const LIVE_STALE_AFTER_SECONDS = appConfig.live.staleAfterSeconds;
 
 function LiveDataStatus({
   sync,

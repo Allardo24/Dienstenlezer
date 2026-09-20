@@ -1,4 +1,5 @@
 import { useEffect, useState } from "react";
+import { appConfig } from "./appConfig";
 import { Award, Braces, CheckCircle2, ChevronDown, ChevronLeft, ChevronRight, Download, Plus, Save, Trash2, X } from "lucide-react";
 import { listAdminAccounts, type Account } from "./auth";
 import {
@@ -25,7 +26,7 @@ import {
 import type { Concession, Division } from "./types";
 
 export function PersonalDataPanel() {
-  const dutiesPerPage = 5;
+  const dutiesPerPage = appConfig.account.dutiesPerPage;
   const [duties, setDuties] = useState<DutyRecord[]>([]);
   const [dutyPage, setDutyPage] = useState(1);
   const [statistics, setStatistics] = useState<PersonalStatistics>();
@@ -251,7 +252,7 @@ export function AchievementManagement({
   const [accountAchievements, setAccountAchievements] = useState<EarnedAchievement[]>([]);
   const [error, setError] = useState<string>();
   const [jsonEditorOpen, setJsonEditorOpen] = useState(false);
-  const [jsonDraft, setJsonDraft] = useState(() => achievementJsonTemplate(divisions[0]?.id));
+  const [jsonDraft, setJsonDraft] = useState(() => achievementJsonTemplate());
   const [jsonError, setJsonError] = useState<string>();
   const [jsonMessage, setJsonMessage] = useState<string>();
   const [jsonJoinOperator, setJsonJoinOperator] = useState<"all" | "any">("all");
@@ -396,12 +397,12 @@ export function AchievementManagement({
   function loadDefinitionInJsonEditor(definition: AchievementDefinition) {
     setJsonDraft(formatAchievementJson(definition));
     setJsonError(undefined);
-    setJsonMessage(`${definition.title} geladen. Opslaan maakt een nieuwe versie van deze achievement.`);
+    setJsonMessage(`${definition.title} geladen.`);
     setJsonEditorOpen(true);
   }
 
   function loadJsonExample() {
-    setJsonDraft(achievementJsonTemplate(divisions[0]?.id));
+    setJsonDraft(achievementJsonTemplate());
     setJsonError(undefined);
     setJsonMessage(undefined);
   }
@@ -440,7 +441,7 @@ export function AchievementManagement({
       setJsonDraft(formatAchievementJson(saved));
       setJsonError(undefined);
       setJsonMessage(exists
-        ? `${saved.title} opgeslagen als versie ${saved.version}.`
+        ? `${saved.title} opgeslagen.`
         : `${saved.title} opgeslagen als inactieve achievement.`);
       await reload();
     } catch (saveError) {
@@ -456,7 +457,7 @@ export function AchievementManagement({
         {definitions.map((definition) => <li key={definition.id}>
           <div>
             <strong>{definition.title}</strong>
-            <span>v{definition.version} · {definition.enabled ? "Actief" : "Uit"}</span>
+            <span>{definition.enabled ? "Actief" : "Uit"}</span>
             <span className="achievement-condition-summary">
               <b>ALS</b> {achievementConditionPreview(definition.condition, divisions, concessions)}
             </span>
@@ -635,7 +636,7 @@ export function AchievementManagement({
           <ul className="achievement-definition-list">
             {accountAchievements.map((achievement) => (
               <li key={achievement.id}>
-                <div><strong>{achievement.title}</strong><span>Behaald op {formatTimestamp(achievement.earnedAt)} · v{achievement.version}</span></div>
+                <div><strong>{achievement.title}</strong><span>Behaald op {formatTimestamp(achievement.earnedAt)}</span></div>
                 <button className="secondary-button danger" type="button" onClick={() => void revoke(achievement)}>Intrekken</button>
               </li>
             ))}
@@ -677,12 +678,11 @@ const ACHIEVEMENT_METRICS = new Set<AchievementMetric>([
 ]);
 const ACHIEVEMENT_COMPARISONS = new Set(["gt", "gte", "lt", "lte", "eq", "between"]);
 
-function achievementJsonTemplate(divisionId?: string): string {
+function achievementJsonTemplate(): string {
   const divisionCondition = {
     kind: "metric",
     metric: "dutyCount",
     lines: [],
-    ...(divisionId ? { divisionId } : {}),
     comparison: "gte",
     value: 1,
   };
@@ -786,6 +786,12 @@ function validateAchievementConditionJson(value: unknown, path: string, depth: n
   if (typeof value.metric !== "string" || !ACHIEVEMENT_METRICS.has(value.metric as AchievementMetric)) {
     throw new Error(`${path}.metric is onbekend.`);
   }
+  // Normalize absent filters to the same defaults used by the server.
+  if (value.lines == null) value.lines = [];
+  if (value.materialTypes === null) delete value.materialTypes;
+  if (value.divisionId === null || (typeof value.divisionId === "string" && !value.divisionId.trim())) delete value.divisionId;
+  if (value.withinSingleDuty === null) delete value.withinSingleDuty;
+  if (value.consecutive === null) delete value.consecutive;
   if (!Array.isArray(value.lines) || value.lines.some((line) => typeof line !== "string")) {
     throw new Error(`${path}.lines moet een lijst met tekstwaarden zijn.`);
   }
