@@ -1,5 +1,11 @@
 # Wijzigingen
 
+## 1.4.8
+
+- Ondersteuning voor persoonlijke diensten toegevoegd: nu kan een gebruiker zelf een eenmalige dienst uploaden en gebruiken
+- Als een dienst is vastgezet zullen de te rijden blokken herkenbaar zijn in het omloop overzicht
+- Dienstenlezer leest nu ook stalling uit en kan dit gebruiken voor statistieken
+
 ## 1.4.7
 
 - een paar verbetering voor de backend

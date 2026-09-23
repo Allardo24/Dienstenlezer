@@ -243,6 +243,7 @@ export function AchievementManagement({
   const [materialTypes, setMaterialTypes] = useState<string[]>([]);
   const [materialDraft, setMaterialDraft] = useState("");
   const [divisionId, setDivisionId] = useState("");
+  const [depot, setDepot] = useState("");
   const [withinSingleDuty, setWithinSingleDuty] = useState(false);
   const [consecutive, setConsecutive] = useState(false);
   const [comparison, setComparison] = useState<"gt" | "gte" | "lt" | "lte" | "eq">("gte");
@@ -282,7 +283,7 @@ export function AchievementManagement({
 
   const selectedLines = mergeAchievementLines(lines, parseAchievementLines(lineDraft));
   const selectedMaterialTypes = mergeAchievementValues(materialTypes, parseAchievementValues(materialDraft));
-  const selectedScope = achievementScopeLabel(divisionId || undefined, divisions, concessions);
+  const selectedScope = [achievementScopeLabel(divisionId || undefined, divisions, concessions), depot.trim() ? `van stalling ${depot.trim()}` : ""].filter(Boolean).join(" ");
   const rulePreview = achievementRulePreview(
     metric,
     selectedLines,
@@ -334,12 +335,13 @@ export function AchievementManagement({
           kind: "metric", metric, lines: ["lineMinutes", "fullDutyLines"].includes(metric) ? selectedLines : [],
           materialTypes: ["materialMinutes", "fullDutyMaterial"].includes(metric) ? selectedMaterialTypes : [],
           divisionId: divisionId || undefined,
+          depot: depot.trim() || undefined,
           withinSingleDuty: !["dutyCount", "fullDutyMaterial", "fullDutyLines"].includes(metric) && withinSingleDuty,
           consecutive: ["fullDutyMaterial", "fullDutyLines"].includes(metric) && consecutive,
           comparison, value,
         },
       });
-      setTitle(""); setDescription(""); setBadge(""); setLines([]); setLineDraft(""); setMaterialTypes([]); setMaterialDraft(""); setDivisionId(""); setWithinSingleDuty(false); setConsecutive(false);
+      setTitle(""); setDescription(""); setBadge(""); setLines([]); setLineDraft(""); setMaterialTypes([]); setMaterialDraft(""); setDivisionId(""); setDepot(""); setWithinSingleDuty(false); setConsecutive(false);
       await reload();
     } catch (saveError) { setError(saveError instanceof Error ? saveError.message : String(saveError)); }
   }
@@ -484,6 +486,7 @@ export function AchievementManagement({
         {(metric === "lineMinutes" || metric === "uniqueLines" || metric === "fullDutyMaterial" || metric === "fullDutyLines") && (
           <label><span>Divisie (optioneel)</span><select value={divisionId} onChange={(event) => setDivisionId(event.target.value)}><option value="">Alle divisies</option>{divisions.map((division) => <option key={division.id} value={division.id}>{division.name}</option>)}</select></label>
         )}
+        <label><span>Stalling (optioneel)</span><input value={depot} onChange={(event) => setDepot(event.target.value)} placeholder="Alle stallingen" /></label>
         {(metric === "lineMinutes" || metric === "fullDutyLines") && (
           <div className="achievement-lines-field">
             <span>Lijnen optellen</span>
@@ -600,6 +603,7 @@ export function AchievementManagement({
               <div className="achievement-json-field-help">
                 <strong>Optionele filters</strong>
                 <span><code>divisionId</code> divisie</span>
+                <span><code>depot</code> stalling, bijvoorbeeld Lisse, Garage</span>
                 <span><code>lines</code> lijnen optellen</span>
                 <span><code>materialTypes</code> materieel</span>
                 <span><code>withinSingleDuty</code> binnen één dienst</span>
@@ -788,6 +792,8 @@ function validateAchievementConditionJson(value: unknown, path: string, depth: n
   }
   // Normalize absent filters to the same defaults used by the server.
   if (value.lines == null) value.lines = [];
+  if (value.depot === null || (typeof value.depot === "string" && !value.depot.trim())) delete value.depot;
+  if (value.depot !== undefined && typeof value.depot !== "string") throw new Error(`${path}.depot moet tekst zijn.`);
   if (value.materialTypes === null) delete value.materialTypes;
   if (value.divisionId === null || (typeof value.divisionId === "string" && !value.divisionId.trim())) delete value.divisionId;
   if (value.withinSingleDuty === null) delete value.withinSingleDuty;
@@ -864,9 +870,9 @@ function achievementRulePreview(
   const dutyScope = withinSingleDuty ? " binnen dezelfde dienst" : "";
   const materialLabel = materialTypes.length > 0 ? materialTypes.join(" + ") : "alle materieelsoorten";
   const subject = {
-    totalMinutes: `het totaal aantal lijnminuten${dutyScope}`,
-    pauseMinutes: `het aantal pauzeminuten${dutyScope}`,
-    materialMinutes: `de minuten op ${materialLabel}${dutyScope}`,
+    totalMinutes: `het totaal aantal lijnminuten${scope}${dutyScope}`,
+    pauseMinutes: `het aantal pauzeminuten${scope}${dutyScope}`,
+    materialMinutes: `de minuten op ${materialLabel}${scope}${dutyScope}`,
     dutyCount: `het aantal gereden diensten${scope}`,
     uniqueLines: `het aantal unieke lijnen${scope}${dutyScope}`,
     lineMinutes: lines.length > 0
@@ -890,7 +896,7 @@ function achievementConditionPreview(
       .join(separator);
   }
 
-  const scopeLabel = achievementScopeLabel(condition.divisionId, divisions, concessions) ?? "over alle divisies";
+  const scopeLabel = [achievementScopeLabel(condition.divisionId, divisions, concessions) ?? "over alle divisies", condition.depot?.trim() ? `van stalling ${condition.depot.trim()}` : ""].filter(Boolean).join(" ");
   if (condition.comparison === "between") {
     const subject = achievementRulePreview(
       condition.metric,
@@ -970,8 +976,9 @@ function dutiesToCsv(rows: DutyExportRow[]): string {
     row.unpaid === undefined ? "" : row.unpaid ? "ja" : "nee",
     row.sourceMovementId ?? "",
     row.sourceFileId,
+    row.depot ?? "",
   ]);
-  return [headers, ...values].map((row) => row.map(csvValue).join(";")).join("\r\n");
+  return [[...headers, "stalling"], ...values].map((row) => row.map(csvValue).join(";")).join("\r\n");
 }
 
 function csvValue(value: string | number): string {

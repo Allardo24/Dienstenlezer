@@ -18,9 +18,9 @@ type Row = {
 };
 
 const TIME_RE = /^\d{1,2}:\d{2}$/;
-const SERVICE_RE = /^[A-Z]{0,3}\d{4,5}$/;
+const SERVICE_RE = /^(?:[A-Z]{1,3}-?)?\d{4,5}(?:[/-][A-Z0-9]+)*$/;
 const SERVICE_LABEL_RE = /^dienst(?:nummer|nr)?\s*:?\s*$/i;
-const INLINE_SERVICE_RE = /^dienst(?:nummer|nr)?\s*:?\s*([A-Z]{0,3}\d{4,5})\s*$/i;
+const INLINE_SERVICE_RE = /^dienst(?:nummer|nr)?(?:\s*:\s*|\s+)(\S+)\s*$/i;
 const DATE_RE = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
 
 export async function parsePdfFiles(files: File[]): Promise<ParseResult[]> {
@@ -104,9 +104,7 @@ function readDienst(sourceFile: string, pageNumber: number, rows: Row[], items: 
   const serviceNumber = findServiceNumber(rows, topRows) ?? `pagina-${pageNumber}`;
 
   const date = items.find((item) => DATE_RE.test(item.text))?.text;
-  const location = topRows
-    .flatMap((row) => row.items)
-    .find((item) => item.x > 250 && item.x < 360 && !DATE_RE.test(item.text))?.text;
+  const location = detectServiceDepot(items);
 
   const metaRow = rows.find((row) => row.items.some((item) => item.text === "Start:"));
   const metaTimes = metaRow?.items.filter((item) => TIME_RE.test(item.text)).map((item) => item.text) ?? [];
@@ -118,10 +116,43 @@ function readDienst(sourceFile: string, pageNumber: number, rows: Row[], items: 
     pageNumber,
     date,
     location,
+    depot: location,
     start: metaTimes[0],
     end: metaTimes[1],
     length,
   };
+}
+
+export function detectServiceDepot(items: TextItem[]): string | undefined {
+  if (!items.length) return undefined;
+  const rows = headerRows(groupRows(items), items);
+  const serviceNumber = findServiceNumber(rows, rows);
+  const headerItems = rows.flatMap((row) => row.items);
+  const service = headerItems.find((item) => item.text === serviceNumber || INLINE_SERVICE_RE.test(item.text));
+  const date = headerItems.find((item) => DATE_RE.test(item.text));
+  const clean = (parts: TextItem[]) => parts.map((item) => item.text).join(" ")
+    .replace(/\s+/g, " ").replace(/\s+,/g, ",").trim() || undefined;
+
+  for (const row of rows) {
+    const label = row.items.findIndex((item) => /^(stalling|standplaats|locatie)\s*:/i.test(item.text));
+    if (label >= 0) {
+      const parts = row.items.slice(label).filter((item) => !DATE_RE.test(item.text) && !/^qbuzz$/i.test(item.text));
+      const value = clean(parts)?.replace(/^(stalling|standplaats|locatie)\s*:\s*/i, "");
+      if (value) return value;
+    }
+  }
+  if (!service || !date) return undefined;
+  // The depot occupies the header cell above the date and right of the duty number.
+  const candidates = rows.filter((row) => row.y > date.y + 4 && row.y >= service.y - 4);
+  for (const row of candidates.sort((a, b) => Math.abs(a.y - service.y) - Math.abs(b.y - service.y))) {
+    const parts = row.items.filter((item) => item.x >= service.x + service.width / 2
+      && !/^qbuzz$/i.test(item.text) && !DATE_RE.test(item.text)
+      && !SERVICE_RE.test(item.text) && /[a-z]/i.test(item.text)
+      && !/^(ma-vr|za|zo|start|einde|lengte|dienst)\b/i.test(item.text));
+    const value = clean(parts);
+    if (value) return value;
+  }
+  return undefined;
 }
 
 export function detectServiceNumber(items: TextItem[], pageNumber = 1): string {
@@ -129,11 +160,18 @@ export function detectServiceNumber(items: TextItem[], pageNumber = 1): string {
   return findServiceNumber(rows, headerRows(rows, items)) ?? `pagina-${pageNumber}`;
 }
 
-function findServiceNumber(rows: Row[], topRows: Row[]): string | undefined {
-  for (const row of rows) {
+function isLabelledServiceNumber(value: string): boolean {
+  // The explicit header label allows more formats than the unlabelled fallback.
+  return value.length <= 32 && /\d/.test(value)
+    && /^[a-z0-9]+(?:[-/._][a-z0-9]+)*$/i.test(value)
+    && !DATE_RE.test(value) && !/^\d{4}-\d{2}-\d{2}$/.test(value);
+}
+
+function findServiceNumber(_rows: Row[], topRows: Row[]): string | undefined {
+  for (const row of topRows) {
     for (const item of row.items) {
       const inlineMatch = item.text.match(INLINE_SERVICE_RE);
-      if (inlineMatch) {
+      if (inlineMatch && isLabelledServiceNumber(inlineMatch[1])) {
         return inlineMatch[1];
       }
       if (!SERVICE_LABEL_RE.test(item.text)) {
@@ -141,7 +179,7 @@ function findServiceNumber(rows: Row[], topRows: Row[]): string | undefined {
       }
 
       const candidates = row.items
-        .filter((candidate) => candidate !== item && SERVICE_RE.test(candidate.text))
+        .filter((candidate) => candidate !== item && isLabelledServiceNumber(candidate.text))
         .sort((first, second) => {
           const firstIsRight = first.x >= item.x ? 0 : 1;
           const secondIsRight = second.x >= item.x ? 0 : 1;

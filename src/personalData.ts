@@ -1,6 +1,7 @@
 import { accountRequest } from "./auth";
 
 export type DutyRecord = {
+  depot?: string | null;
   id: string;
   operationalDate: string;
   sourceFileId: string;
@@ -13,6 +14,7 @@ export type DutyRecord = {
 };
 
 export type DutyExportRow = {
+  depot?: string | null;
   operationalDate: string;
   divisionId: string;
   serviceNumber: string;
@@ -57,6 +59,7 @@ export type AchievementCondition =
       lines: string[];
       materialTypes?: string[];
       divisionId?: string;
+      depot?: string;
       withinSingleDuty?: boolean;
       consecutive?: boolean;
       comparison: "gt" | "gte" | "lt" | "lte" | "eq" | "between";

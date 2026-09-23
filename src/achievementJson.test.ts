@@ -11,6 +11,17 @@ const metric = (name: "dutyCount" | "pauseMinutes"): AchievementCondition => ({
 });
 
 describe("achievement JSON", () => {
+  it("accepteert een stallingfilter en optioneel een lege stalling", () => {
+    const input = { id: "stalling", title: "Stalling", description: "Vanuit Lisse", badge: "L", enabled: false,
+      condition: { kind: "metric", metric: "dutyCount", comparison: "gte", value: 1, depot: "Lisse, Garage" } };
+    expect(parseAchievementJson(JSON.stringify(input)).condition).toMatchObject({ depot: "Lisse, Garage" });
+    for (const depot of [null, "", undefined]) {
+      expect(parseAchievementJson(JSON.stringify({ ...input, condition: { ...input.condition, depot } })).condition)
+        .not.toHaveProperty("depot");
+    }
+    expect(() => parseAchievementJson(JSON.stringify({ ...input, condition: { ...input.condition, depot: 5 } })))
+      .toThrow("depot moet tekst zijn");
+  });
   it.each([undefined, null, "", "   "])("accepteert een regel zonder divisiefilter (%s)", (divisionId) => {
     const input = parseAchievementJson(JSON.stringify({
       id: "algemeen", title: "Algemeen", description: "Tien diensten", badge: "10", enabled: false,

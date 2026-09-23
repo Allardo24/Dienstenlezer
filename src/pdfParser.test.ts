@@ -1,11 +1,42 @@
 import { describe, expect, it } from "vitest";
 import { extractMaterialType, propagateMaterialByLoop } from "./materialType";
-import { detectServiceNumber } from "./pdfParser";
+import { detectServiceNumber, detectServiceDepot } from "./pdfParser";
 import type { Movement, TextItem } from "./types";
 
 function text(text: string, x: number, y: number): TextItem {
   return { text, x, y, width: Math.max(10, text.length * 5) };
 }
+
+describe("stalling uit de dienstkop", () => {
+  it.each([1, 1.7, 0.65])("leest gesplitste koptekst onafhankelijk van schaal (%s)", (scale) => {
+    const items = [text("Dienst:", 40, 810), text("V1201", 130, 810),
+      text("Lisse,", 270, 810), text("Garage", 307, 810), text("Qbuzz", 460, 810),
+      text("Ma-Vr", 145, 790), text("03/08/2026", 280, 790),
+      text("Start:", 40, 765), text("04:47", 100, 765),
+      text("Lijn", 40, 745), text("Vertrek", 270, 745), text("Aankomst", 460, 745)];
+    expect(detectServiceDepot(items.map((item) => ({ ...item, x: item.x * scale + 20, y: item.y * scale, width: item.width * scale }))))
+      .toBe("Lisse, Garage");
+  });
+
+  it("accepteert onbekende namen en expliciete labels", () => {
+    expect(detectServiceDepot([text("Standplaats: Nieuwedorp, Depot", 35, 810)]))
+      .toBe("Nieuwedorp, Depot");
+  });
+
+  it("herkent de lange Groningse kop die links over het dienstnummervak uitsteekt", () => {
+    expect(detectServiceDepot([
+      { text: "V3001", x: 138, y: 799, width: 58 },
+      { text: "Groningen, Garage Peizerweg [STREEK]", x: 192, y: 804, width: 270 },
+      text("Dienst:", 48, 798), text("Ma-Vr", 148, 780), text("28/06/2026", 290, 780),
+    ])).toBe("Groningen, Garage Peizerweg [STREEK]");
+  });
+
+  it("verzint geen stalling wanneer het kopvak ontbreekt", () => {
+    expect(detectServiceDepot([text("Dienst:", 40, 810), text("CC1251", 130, 810),
+      text("Qbuzz", 460, 810), text("30/08/2026", 280, 790)] )).toBeUndefined();
+    expect(detectServiceDepot([])).toBeUndefined();
+  });
+});
 
 function movement(overrides: Partial<Movement>): Movement {
   return {
@@ -75,6 +106,23 @@ describe("materieelsoort uit dienstblad", () => {
 });
 
 describe("dienstnummer uit paginakop", () => {
+  it.each(["P-7156/2", "L-7034", "CC1251", "ABCD-123456/A", "7156-2", "D12_B.3", "42"])("behoudt flexibel gelabeld nummer %s", (number) => {
+    expect(detectServiceNumber([text("Dienst:", 48, 798), text(number, 129, 798), text("22/09/2026", 289, 780)])).toBe(number);
+    expect(detectServiceNumber([text(`Dienst: ${number}`, 48, 798)])).toBe(number);
+    expect(detectServiceNumber([text(`Dienstnummer ${number}`, 48, 798)])).toBe(number);
+  });
+
+  it("houdt stallingherkenning intact bij een gesplitste dienst", () => {
+    expect(detectServiceDepot([text("Dienst:", 48, 798), text("P-7156/2", 129, 798),
+      text("Katwijk, Garage", 272, 804), text("22/09/2026", 289, 780)])).toBe("Katwijk, Garage");
+  });
+
+  it("gebruikt geen datum of dienstverwijzing uit de ritregels", () => {
+    expect(detectServiceNumber([text("Dienst:", 48, 798), text("22/09/2026", 129, 798),
+      text("Lijn", 20, 737), text("Vertrek", 271, 737), text("Aankomst", 515, 737),
+      text("Dienst: P-7156/2", 48, 660)])).toBe("pagina-1");
+  });
+
   it("kiest het nummer naast Dienst en niet een viercijferige omloop in de tabel", () => {
     const items = [
       text("Dienst:", 28, 550),

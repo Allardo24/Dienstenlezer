@@ -12,6 +12,7 @@ export type Dienst = {
   pageNumber: number;
   date?: string;
   location?: string;
+  depot?: string;
   start?: string;
   end?: string;
   length?: string;

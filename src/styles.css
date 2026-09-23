@@ -2148,6 +2148,10 @@ h2 {
   cursor: pointer;
 }
 
+.movement-block.is-locked-duty {
+  background: #d8eff5;
+}
+
 .movement-block.continues-next {
   border-right-width: 0;
   border-radius: 8px 0 0 8px;
@@ -4315,3 +4319,34 @@ tbody tr:hover {
     padding-left: 8px;
   }
 }
+/* Private schedule uploads stay compact alongside the general settings. */
+.personal-schedule-list, .personal-guidance-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+.personal-schedule-chip {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 10px;
+  border: 1px solid #b8d3df;
+  border-left: 3px solid #087d91;
+  border-radius: 6px;
+}
+.personal-schedule-chip small { display: block; color: #5b7381; }
+.personal-schedule-draft {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid #dbe6ed;
+}
+.personal-schedule-draft label, .personal-guidance-controls label {
+  display: grid;
+  gap: 4px;
+}
+.personal-schedule-upload { min-width: 0; }
+.personal-schedule-upload .settings-group-heading { flex-wrap: wrap; gap: 12px; }

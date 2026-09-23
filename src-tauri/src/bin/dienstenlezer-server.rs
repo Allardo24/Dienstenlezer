@@ -19,7 +19,7 @@ use chrono::{Datelike, Local, NaiveDate, Timelike};
 use dienstenlezer::live::{get_live_statuses, LiveMovementRequest, LiveRuntime};
 use dienstenlezer::personal::{self, PersonalStore};
 use dienstenlezer::personal_data::{
-    AchievementInput, DutySegmentSnapshot, DutySnapshot, PersonalDataStore,
+    AchievementInput, DutySegmentSnapshot, DutySnapshot, PersonalDataStore, PersonalSchedule,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -305,6 +305,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/files", post(upload_file))
         .route("/api/files/check", post(check_files))
         .route("/api/me/duties", get(list_my_duties).post(confirm_my_duty))
+        .route(
+            "/api/me/personal-schedules",
+            get(list_personal_schedules).post(upload_personal_schedule),
+        )
+        .route(
+            "/api/me/personal-schedules/{id}",
+            axum::routing::delete(delete_personal_schedule),
+        )
+        .route(
+            "/api/me/personal-schedules/{id}/live",
+            get(personal_schedule_live),
+        )
         .route("/api/me/duties/export", get(export_my_duties))
         .route("/api/me/duties/{id}", axum::routing::delete(delete_my_duty))
         .route("/api/me/statistics", get(my_statistics))
@@ -490,6 +502,267 @@ async fn export_my_duties(
         .map_err(internal_error)
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonalScheduleInput {
+    division_id: String,
+    parse_result: Value,
+}
+
+async fn list_personal_schedules(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    let schedules = state
+        .personal_data
+        .personal_schedules(&account.id)
+        .await
+        .map_err(bad_request)?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(schedules)))
+}
+
+fn personal_schedule_record(schedule: &PersonalSchedule) -> StoredFileRecord {
+    StoredFileRecord {
+        id: schedule.id.clone(),
+        name: "Persoonlijke dienst".into(),
+        size: 0,
+        last_modified: 0,
+        uploaded_at: 0,
+        enabled: true,
+        expires_on: None,
+        day_segment: "unassigned".into(),
+        division_id: schedule.division_id.clone(),
+        content_hash: None,
+        parse_result: schedule.parse_result.clone(),
+    }
+}
+
+// Only structured schedule fields are retained, never PDF bytes, filenames or driver headers.
+fn prepare_personal_schedule(
+    input: PersonalScheduleInput,
+) -> Result<PersonalSchedule, (StatusCode, Json<ApiError>)> {
+    use rand::{rngs::OsRng, RngCore};
+    let mut bytes = [0_u8; 16];
+    OsRng.fill_bytes(&mut bytes);
+    let id = format!(
+        "personal-{}",
+        bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+    );
+    let services = input.parse_result["diensten"]
+        .as_array()
+        .filter(|s| s.len() == 1)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Upload iedere persoonlijke dienst met een eigen datum.",
+            )
+        })?;
+    let service = &services[0];
+    let date = service["date"]
+        .as_str()
+        .and_then(|s| NaiveDate::parse_from_str(s, "%d/%m/%Y").ok())
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Geen geldige uitvoeringsdatum op het dienstblad.",
+            )
+        })?;
+    let number = service["serviceNumber"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 32 && !s.starts_with("pagina-"))
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Dienstnummer kon niet worden herkend.",
+            )
+        })?;
+    fn fields(value: &Value, keys: &[&str]) -> serde_json::Map<String, Value> {
+        keys.iter()
+            .filter_map(|key| {
+                value[*key]
+                    .as_str()
+                    .map(|v| ((*key).to_owned(), Value::String(v.to_owned())))
+            })
+            .collect()
+    }
+    let mut duty = fields(
+        service,
+        &["serviceNumber", "date", "depot", "start", "end", "length"],
+    );
+    duty.insert("id".into(), Value::String(id.clone()));
+    duty.insert("sourceFileId".into(), Value::String(id.clone()));
+    duty.insert(
+        "sourceFile".into(),
+        Value::String("Persoonlijke dienst".into()),
+    );
+    duty.insert("pageNumber".into(), Value::from(1));
+    duty.insert(
+        "divisionId".into(),
+        Value::String(input.division_id.clone()),
+    );
+    let rows = input.parse_result["movements"]
+        .as_array()
+        .filter(|rows| !rows.is_empty() && rows.len() <= 1000)
+        .ok_or_else(|| {
+            api_error(
+                StatusCode::BAD_REQUEST,
+                "Geen ritregels of te veel ritregels (maximaal 1000).",
+            )
+        })?;
+    let mut movements = Vec::new();
+    for (index, row) in rows.iter().enumerate() {
+        if row["dienstnummer"].as_str() != Some(number) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "Ritregel hoort niet bij deze dienst.",
+            ));
+        }
+        for key in ["vertrek", "aankomst"] {
+            if !row[key].as_str().is_some_and(valid_personal_time) {
+                return Err(api_error(
+                    StatusCode::BAD_REQUEST,
+                    "Ongeldige tijd in persoonlijke dienst.",
+                ));
+            }
+        }
+        if !matches!(
+            row["type"].as_str(),
+            Some("rit" | "materiaal" | "pauze" | "dienst" | "overig")
+        ) {
+            return Err(api_error(
+                StatusCode::BAD_REQUEST,
+                "Ongeldig soort ritregel.",
+            ));
+        }
+        let mut movement = fields(
+            row,
+            &[
+                "dienstnummer",
+                "omloopnummer",
+                "lijnnummer",
+                "ritnummer",
+                "materieelsoort",
+                "vertrek",
+                "aankomst",
+                "van",
+                "naar",
+                "type",
+            ],
+        );
+        movement.insert("raw".into(), Value::String(String::new()));
+        movement.insert("id".into(), Value::String(format!("{id}-{index}")));
+        movement.insert("sourceFileId".into(), Value::String(id.clone()));
+        movement.insert(
+            "sourceFile".into(),
+            Value::String("Persoonlijke dienst".into()),
+        );
+        movement.insert("pageNumber".into(), Value::from(1));
+        movement.insert(
+            "divisionId".into(),
+            Value::String(input.division_id.clone()),
+        );
+        movements.push(Value::Object(movement));
+    }
+    let schedule = PersonalSchedule {
+        id,
+        operational_date: date.format("%Y-%m-%d").to_string(),
+        division_id: input.division_id,
+        parse_result: serde_json::json!({ "fileName": "Persoonlijke dienst", "diensten": [duty], "movements": movements, "warnings": [] }),
+    };
+    let json = serde_json::to_string(&schedule.parse_result).map_err(bad_request)?;
+    if json.len() > 512_000 {
+        return Err(api_error(
+            StatusCode::BAD_REQUEST,
+            "Persoonlijke dienst is te groot.",
+        ));
+    }
+    duty_snapshot(
+        &personal_schedule_record(&schedule),
+        &schedule.operational_date,
+        number,
+        "guidance",
+    )?;
+    Ok(schedule)
+}
+
+fn valid_personal_time(value: &str) -> bool {
+    value.split_once(':').is_some_and(|(h, m)| {
+        h.parse::<u32>().is_ok_and(|h| h < 48)
+            && m.len() == 2
+            && m.parse::<u32>().is_ok_and(|m| m < 60)
+    })
+}
+
+async fn upload_personal_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(input): Json<PersonalScheduleInput>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, true).await?;
+    validate_division_exists(&input.division_id, &*state.organization.read().await)?;
+    let schedule = prepare_personal_schedule(input)?;
+    state
+        .personal_data
+        .save_personal_schedule(&account.id, &schedule)
+        .await
+        .map_err(bad_request)?;
+    Ok((
+        StatusCode::CREATED,
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(schedule),
+    ))
+}
+
+async fn delete_personal_schedule(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<StatusCode, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, true).await?;
+    if state
+        .personal_data
+        .delete_personal_schedule(&account.id, &id)
+        .await
+        .map_err(bad_request)?
+    {
+        Ok(StatusCode::NO_CONTENT)
+    } else {
+        Err(api_error(
+            StatusCode::NOT_FOUND,
+            "Persoonlijke dienst niet gevonden.",
+        ))
+    }
+}
+
+async fn personal_schedule_live(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<impl IntoResponse, (StatusCode, Json<ApiError>)> {
+    let account = require_account(&state, &headers, false).await?;
+    let schedules = state
+        .personal_data
+        .personal_schedules(&account.id)
+        .await
+        .map_err(bad_request)?;
+    let schedule = schedules
+        .iter()
+        .find(|s| s.id == id)
+        .ok_or_else(|| api_error(StatusCode::NOT_FOUND, "Persoonlijke dienst niet gevonden."))?;
+    let mut record = personal_schedule_record(schedule);
+    record.day_segment = "personal".into();
+    let movements = live_requests_for_records(
+        &[record],
+        "personal",
+        &BTreeSet::from([schedule.division_id.clone()]),
+    );
+    let response = get_live_statuses(&state.live, schedule.operational_date.clone(), movements)
+        .await
+        .map_err(|e| api_error(StatusCode::BAD_GATEWAY, e))?;
+    Ok(([(header::CACHE_CONTROL, "no-store")], Json(response)))
+}
+
 async fn confirm_my_duty(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -505,7 +778,30 @@ async fn confirm_my_duty(
             "Ongeldige registratiebron.",
         ));
     }
-    let snapshot = {
+    let snapshot = if request.source_file_id.starts_with("personal-") {
+        let schedules = state
+            .personal_data
+            .personal_schedules(&account.id)
+            .await
+            .map_err(bad_request)?;
+        let schedule = schedules
+            .iter()
+            .find(|s| {
+                s.id == request.source_file_id && s.operational_date == request.operational_date
+            })
+            .ok_or_else(|| {
+                api_error(
+                    StatusCode::NOT_FOUND,
+                    "Persoonlijke dienst niet gevonden voor deze datum.",
+                )
+            })?;
+        duty_snapshot(
+            &personal_schedule_record(schedule),
+            &schedule.operational_date,
+            &request.service_number,
+            origin,
+        )?
+    } else {
         let records = state.records.read().await;
         let record = records
             .iter()
@@ -827,6 +1123,12 @@ fn duty_snapshot(
         end_minute += 24 * 60;
     }
     Ok(DutySnapshot {
+        depot: service
+            .get("depot")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned),
         operational_date: operational_date.to_owned(),
         source_file_id: record.id.clone(),
         source_content_hash: record.content_hash.clone(),
@@ -1737,6 +2039,60 @@ async fn shutdown_signal() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn personal_input() -> PersonalScheduleInput {
+        PersonalScheduleInput {
+            division_id: "lkn".into(),
+            parse_result: serde_json::json!({
+                "driverName": "Do not store", "fileName": "private-name.pdf", "pdf": "secret",
+                "diensten": [{"serviceNumber":"L-7034", "date":"18/09/2026", "start":"15:37", "end":"24:30", "depot":"Katwijk, Garage", "driverName":"Do not store"}],
+                "movements": [{"dienstnummer":"L-7034", "vertrek":"23:32", "aankomst":"0:20", "type":"rit", "lijnnummer":"400", "van":"A", "naar":"B", "raw":"private header"}]
+            }),
+        }
+    }
+
+    #[test]
+    fn personal_upload_keeps_only_schedule_fields_and_exact_date() {
+        let schedule = prepare_personal_schedule(personal_input()).unwrap();
+        assert_eq!(schedule.operational_date, "2026-09-18");
+        let json = schedule.parse_result.to_string();
+        for private in [
+            "driverName",
+            "Do not store",
+            "private-name",
+            "secret",
+            "private header",
+        ] {
+            assert!(!json.contains(private));
+        }
+        let snapshot = duty_snapshot(
+            &personal_schedule_record(&schedule),
+            &schedule.operational_date,
+            "L-7034",
+            "guidance",
+        )
+        .unwrap();
+        assert_eq!(snapshot.start_minute, 937);
+        assert_eq!(snapshot.end_minute, 1470);
+        assert_eq!(
+            snapshot.segments[0].end_minute - snapshot.segments[0].start_minute,
+            48
+        );
+        assert_eq!(snapshot.depot.as_deref(), Some("Katwijk, Garage"));
+    }
+
+    #[test]
+    fn personal_upload_rejects_invalid_date_times_and_mixed_duties() {
+        let mut input = personal_input();
+        input.parse_result["diensten"][0]["date"] = Value::from("31/02/2026");
+        assert!(prepare_personal_schedule(input).is_err());
+        let mut input = personal_input();
+        input.parse_result["movements"][0]["aankomst"] = Value::from("24:99");
+        assert!(prepare_personal_schedule(input).is_err());
+        let mut input = personal_input();
+        input.parse_result["movements"][0]["dienstnummer"] = Value::from("other");
+        assert!(prepare_personal_schedule(input).is_err());
+    }
 
     fn record(segment: &str, enabled: bool) -> StoredFileRecord {
         StoredFileRecord {

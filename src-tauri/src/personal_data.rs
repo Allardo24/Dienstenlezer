@@ -15,8 +15,18 @@ pub struct PersonalDataStore {
     connection: Arc<Mutex<Connection>>,
 }
 
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PersonalSchedule {
+    pub id: String,
+    pub operational_date: String,
+    pub division_id: String,
+    pub parse_result: serde_json::Value,
+}
+
 #[derive(Clone, Debug)]
 pub struct DutySnapshot {
+    pub depot: Option<String>,
     pub operational_date: String,
     pub source_file_id: String,
     pub source_content_hash: Option<String>,
@@ -43,6 +53,7 @@ pub struct DutySegmentSnapshot {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DutyRecord {
+    pub depot: Option<String>,
     pub id: String,
     pub operational_date: String,
     pub source_file_id: String,
@@ -57,6 +68,7 @@ pub struct DutyRecord {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DutyExportRow {
+    pub depot: Option<String>,
     pub operational_date: String,
     pub division_id: String,
     pub service_number: String,
@@ -122,6 +134,8 @@ pub enum AchievementCondition {
         material_types: Vec<String>,
         #[serde(default, rename = "divisionId", alias = "division_id")]
         division_id: Option<String>,
+        #[serde(default)]
+        depot: Option<String>,
         #[serde(default, rename = "withinSingleDuty", alias = "within_single_duty")]
         within_single_duty: bool,
         #[serde(default)]
@@ -135,6 +149,7 @@ pub enum AchievementCondition {
 
 #[derive(Debug, Clone)]
 struct DutyAchievementStatistics {
+    depot: Option<String>,
     operational_date: String,
     start_minute: i64,
     division_id: String,
@@ -188,6 +203,62 @@ pub struct AchievementProgress {
 }
 
 impl PersonalDataStore {
+    pub async fn personal_schedules(
+        &self,
+        account_id: &str,
+    ) -> Result<Vec<PersonalSchedule>, String> {
+        let connection = self.connection.lock().await;
+        let mut statement = connection.prepare("SELECT id, operational_date, division_id, parse_result FROM personal_schedules WHERE account_id=?1 ORDER BY operational_date DESC, id")
+            .map_err(|e| e.to_string())?;
+        let rows = statement
+            .query_map([account_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                ))
+            })
+            .map_err(|e| e.to_string())?;
+        rows.map(|row| {
+            let (id, operational_date, division_id, json) = row.map_err(|e| e.to_string())?;
+            Ok(PersonalSchedule {
+                id,
+                operational_date,
+                division_id,
+                parse_result: serde_json::from_str(&json).map_err(|e| e.to_string())?,
+            })
+        })
+        .collect()
+    }
+
+    pub async fn save_personal_schedule(
+        &self,
+        account_id: &str,
+        schedule: &PersonalSchedule,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock().await;
+        let json = serde_json::to_string(&schedule.parse_result).map_err(|e| e.to_string())?;
+        connection.execute("INSERT INTO personal_schedules(id,account_id,operational_date,division_id,parse_result,service_number) VALUES(?1,?2,?3,?4,?5,?6)",
+            params![schedule.id, account_id, schedule.operational_date, schedule.division_id, json, schedule.parse_result["diensten"][0]["serviceNumber"].as_str().unwrap_or("")])
+            .map_err(|_| "Deze persoonlijke dienst is al toegevoegd voor die datum.".to_owned())?;
+        Ok(())
+    }
+
+    pub async fn delete_personal_schedule(
+        &self,
+        account_id: &str,
+        id: &str,
+    ) -> Result<bool, String> {
+        let connection = self.connection.lock().await;
+        connection
+            .execute(
+                "DELETE FROM personal_schedules WHERE account_id=?1 AND id=?2",
+                params![account_id, id],
+            )
+            .map(|count| count > 0)
+            .map_err(|e| e.to_string())
+    }
     pub fn open(path: &Path) -> Result<Self, Box<dyn std::error::Error>> {
         let connection = Connection::open(path)?;
         connection.busy_timeout(Duration::from_secs(5))?;
@@ -221,12 +292,13 @@ impl PersonalDataStore {
         let duplicate: Option<String> = transaction
             .query_row(
                 "SELECT id FROM duty_records WHERE account_id = ?1 AND operational_date = ?2
-             AND source_file_id = ?3 AND service_number = ?4 AND status = 'confirmed'",
+             AND (source_file_id = ?3 OR (?5 AND source_file_id LIKE 'personal-%')) AND service_number = ?4 AND status = 'confirmed'",
                 params![
                     account_id,
                     snapshot.operational_date,
                     snapshot.source_file_id,
-                    snapshot.service_number
+                    snapshot.service_number,
+                    snapshot.source_file_id.starts_with("personal-")
                 ],
                 |row| row.get(0),
             )
@@ -242,8 +314,8 @@ impl PersonalDataStore {
             .execute(
                 "INSERT INTO duty_records
              (id, account_id, operational_date, source_file_id, source_content_hash, division_id,
-              service_number, start_minute, end_minute, status, origin, confirmed_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'confirmed', ?10, ?11, ?11)",
+              service_number, start_minute, end_minute, status, origin, confirmed_at, updated_at, depot)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'confirmed', ?10, ?11, ?11, ?12)",
                 params![
                     id,
                     account_id,
@@ -255,7 +327,8 @@ impl PersonalDataStore {
                     snapshot.start_minute,
                     snapshot.end_minute,
                     snapshot.origin,
-                    now
+                    now,
+                    snapshot.depot
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -294,6 +367,7 @@ impl PersonalDataStore {
         recompute_achievements(&transaction, account_id, true)?;
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(DutyRecord {
+            depot: snapshot.depot,
             id,
             operational_date: snapshot.operational_date,
             source_file_id: snapshot.source_file_id,
@@ -535,12 +609,13 @@ fn query_duties(
 ) -> Result<Vec<DutyRecord>, rusqlite::Error> {
     let mut statement = connection.prepare(
         "SELECT id, operational_date, source_file_id, division_id, service_number, start_minute,
-         end_minute, origin, confirmed_at FROM duty_records
+         end_minute, origin, confirmed_at, depot FROM duty_records
          WHERE account_id = ?1 AND status = 'confirmed' ORDER BY operational_date DESC, start_minute DESC"
     )?;
     let rows = statement
         .query_map(params![account_id], |row| {
             Ok(DutyRecord {
+                depot: row.get(9)?,
                 id: row.get(0)?,
                 operational_date: row.get(1)?,
                 source_file_id: row.get(2)?,
@@ -564,7 +639,7 @@ fn query_duty_export_rows(
         "SELECT d.operational_date, d.division_id, d.service_number, d.start_minute, d.end_minute,
                 d.origin, d.confirmed_at, s.sequence, s.movement_type, s.line_number, s.trip_number,
                 s.material_type, s.start_minute, s.end_minute, s.duration_minutes, s.unpaid, s.source_movement_id,
-                d.source_file_id
+                d.source_file_id, d.depot
          FROM duty_records d
          LEFT JOIN duty_segments s ON s.duty_record_id = d.id
          WHERE d.account_id = ?1 AND d.status = 'confirmed'
@@ -574,6 +649,7 @@ fn query_duty_export_rows(
         .query_map(params![account_id], |row| {
             let unpaid: Option<i64> = row.get(15)?;
             Ok(DutyExportRow {
+                depot: row.get(18)?,
                 operational_date: row.get(0)?,
                 division_id: row.get(1)?,
                 service_number: row.get(2)?,
@@ -669,7 +745,7 @@ fn statistics_per_duty(
 ) -> Result<Vec<DutyAchievementStatistics>, rusqlite::Error> {
     let mut duties = BTreeMap::<String, DutyAchievementStatistics>::new();
     let mut duty_statement = connection.prepare(
-        "SELECT id, operational_date, start_minute, end_minute, division_id
+        "SELECT id, operational_date, start_minute, end_minute, division_id, depot
          FROM duty_records WHERE account_id=?1 AND status='confirmed'",
     )?;
     for row in duty_statement.query_map(params![account_id], |row| {
@@ -679,12 +755,14 @@ fn statistics_per_duty(
             row.get::<_, i64>(2)?,
             row.get::<_, i64>(3)?,
             row.get::<_, String>(4)?,
+            row.get::<_, Option<String>>(5)?,
         ))
     })? {
-        let (id, operational_date, start_minute, end_minute, division_id) = row?;
+        let (id, operational_date, start_minute, end_minute, division_id, depot) = row?;
         duties.insert(
             id,
             DutyAchievementStatistics {
+                depot,
                 operational_date,
                 start_minute,
                 division_id,
@@ -892,6 +970,9 @@ fn evaluate_condition_with_duties(
     statistics: &PersonalStatistics,
     duty_statistics: &[DutyAchievementStatistics],
 ) -> bool {
+    if let Some((condition, scoped, duties)) = depot_scope(condition, duty_statistics) {
+        return evaluate_condition_with_duties(&condition, &scoped, &duties);
+    }
     match condition {
         AchievementCondition::Group {
             operator,
@@ -918,6 +999,7 @@ fn evaluate_condition_with_duties(
             comparison,
             value,
             max_value,
+            ..
         } => {
             if metric == "dutyCount" && division_id.is_some() {
                 let actual = duty_statistics
@@ -955,6 +1037,9 @@ fn condition_progress(
     statistics: &PersonalStatistics,
     duty_statistics: &[DutyAchievementStatistics],
 ) -> (i64, i64, &'static str) {
+    if let Some((condition, scoped, duties)) = depot_scope(condition, duty_statistics) {
+        return condition_progress(&condition, &scoped, &duties);
+    }
     match condition {
         AchievementCondition::Group {
             operator,
@@ -1023,6 +1108,74 @@ fn condition_progress(
             (current, target, unit)
         }
     }
+}
+
+fn depot_scope(
+    condition: &AchievementCondition,
+    duties: &[DutyAchievementStatistics],
+) -> Option<(
+    AchievementCondition,
+    PersonalStatistics,
+    Vec<DutyAchievementStatistics>,
+)> {
+    let AchievementCondition::Metric {
+        depot: Some(depot),
+        metric,
+        consecutive,
+        division_id,
+        ..
+    } = condition
+    else {
+        return None;
+    };
+    if depot.trim().is_empty() {
+        return None;
+    }
+    let mut rule = condition.clone();
+    if let AchievementCondition::Metric { depot, .. } = &mut rule {
+        *depot = None;
+    }
+    let selected = depot.trim().to_lowercase();
+    let mut scoped = PersonalStatistics::default();
+    let mut scoped_duties = Vec::new();
+    let preserve_streak =
+        *consecutive && matches!(metric.as_str(), "fullDutyLines" | "fullDutyMaterial");
+    for duty in duties {
+        let matches = duty
+            .depot
+            .as_ref()
+            .is_some_and(|name| name.trim().to_lowercase() == selected)
+            && division_id
+                .as_ref()
+                .is_none_or(|division| division == &duty.division_id);
+        if !matches {
+            if preserve_streak {
+                // A duty elsewhere breaks the streak, rather than disappearing from it.
+                let mut gap = duty.clone();
+                gap.statistics = PersonalStatistics::default();
+                scoped_duties.push(gap);
+            }
+            continue;
+        }
+        scoped.duty_count += duty.statistics.duty_count;
+        scoped.total_line_minutes += duty.statistics.total_line_minutes;
+        scoped.pause_minutes += duty.statistics.pause_minutes;
+        scoped.material_minutes += duty.statistics.material_minutes;
+        scoped
+            .line_minutes
+            .extend(duty.statistics.line_minutes.iter().cloned());
+        scoped
+            .material_type_minutes
+            .extend(duty.statistics.material_type_minutes.iter().cloned());
+        scoped_duties.push(duty.clone());
+    }
+    scoped.unique_lines = scoped
+        .line_minutes
+        .iter()
+        .map(|line| (&line.division_id, &line.line_number))
+        .collect::<BTreeSet<_>>()
+        .len() as i64;
+    Some((rule, scoped, scoped_duties))
 }
 
 fn metric_value(
@@ -1263,7 +1416,13 @@ fn sanitized_material_type(value: Option<&str>) -> Option<&str> {
 
 fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     connection.execute_batch(
-        "CREATE TABLE IF NOT EXISTS duty_records (
+        "CREATE TABLE IF NOT EXISTS personal_schedules (
+            id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+            operational_date TEXT NOT NULL, division_id TEXT NOT NULL, parse_result TEXT NOT NULL,
+            service_number TEXT NOT NULL,
+            UNIQUE(account_id, operational_date, service_number)
+        );
+        CREATE TABLE IF NOT EXISTS duty_records (
             id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
             operational_date TEXT NOT NULL, source_file_id TEXT NOT NULL, source_content_hash TEXT,
             division_id TEXT NOT NULL, service_number TEXT NOT NULL, start_minute INTEGER NOT NULL,
@@ -1329,6 +1488,7 @@ fn migrate(connection: &Connection) -> Result<(), rusqlite::Error> {
     ensure_column(connection, "user_achievements", "revoked_at", "INTEGER")?;
     ensure_column(connection, "user_achievements", "revoked_by", "TEXT")?;
     ensure_column(connection, "duty_segments", "material_type", "TEXT")?;
+    ensure_column(connection, "duty_records", "depot", "TEXT")?;
     connection.execute(
         "UPDATE duty_segments SET material_type = NULL
          WHERE LOWER(TRIM(material_type)) LIKE 'bus parkeren%'
@@ -1428,6 +1588,7 @@ mod tests {
             operator: "all".into(),
             conditions: vec![
                 AchievementCondition::Metric {
+                    depot: None,
                     metric: "lineMinutes".into(),
                     lines: vec!["20".into(), "21".into()],
                     material_types: vec![],
@@ -1439,6 +1600,7 @@ mod tests {
                     max_value: None,
                 },
                 AchievementCondition::Metric {
+                    depot: None,
                     metric: "dutyCount".into(),
                     lines: vec![],
                     material_types: vec![],
@@ -1461,6 +1623,7 @@ mod tests {
             ..PersonalStatistics::default()
         };
         let condition = AchievementCondition::Metric {
+            depot: None,
             metric: "totalMinutes".into(),
             lines: vec![],
             material_types: vec![],
@@ -1498,6 +1661,7 @@ mod tests {
         let condition = AchievementCondition::Group {
             operator: "all".into(),
             conditions: vec![AchievementCondition::Metric {
+                depot: None,
                 metric: "lineMinutes".into(),
                 lines: vec!["20".into(), "21".into()],
                 material_types: vec![],
@@ -1561,6 +1725,7 @@ mod tests {
             ..PersonalStatistics::default()
         };
         let condition = AchievementCondition::Metric {
+            depot: None,
             metric: "uniqueLines".into(),
             lines: vec![],
             material_types: vec![],
@@ -1576,6 +1741,98 @@ mod tests {
     }
 
     #[test]
+    fn depot_filters_totals_progress_unique_lines_and_streaks() {
+        let make_duty =
+            |depot: Option<&str>, division: &str, line: &str| DutyAchievementStatistics {
+                depot: depot.map(str::to_owned),
+                operational_date: "2026-09-20".into(),
+                start_minute: 600,
+                division_id: division.into(),
+                statistics: PersonalStatistics {
+                    duty_count: 1,
+                    total_line_minutes: 60,
+                    pause_minutes: 20,
+                    material_minutes: 5,
+                    line_minutes: vec![LineMinutes {
+                        division_id: division.into(),
+                        line_number: line.into(),
+                        minutes: 60,
+                    }],
+                    material_type_minutes: vec![MaterialTypeMinutes {
+                        material_type: "Yutong".into(),
+                        minutes: 65,
+                    }],
+                    ..PersonalStatistics::default()
+                },
+            };
+        let duties = vec![
+            make_duty(Some("Lisse, Garage"), "lisse", "20"),
+            make_duty(Some("Leiden, Garage"), "lisse", "21"),
+            make_duty(Some("Lisse, Garage"), "lisse", "20"),
+            make_duty(None, "lisse", "22"),
+        ];
+        let rule = |metric: &str| -> AchievementCondition {
+            serde_json::from_value(serde_json::json!({"kind":"metric", "metric":metric,
+                "depot":" lisse, garage ", "comparison":"gte", "value":2}))
+            .unwrap()
+        };
+        let aggregate = PersonalStatistics::default();
+        for (metric, expected) in [
+            ("dutyCount", 2),
+            ("uniqueLines", 1),
+            ("lineMinutes", 120),
+            ("totalMinutes", 120),
+            ("pauseMinutes", 40),
+            ("materialMinutes", 10),
+        ] {
+            assert_eq!(
+                condition_progress(&rule(metric), &aggregate, &duties).0,
+                expected,
+                "{metric}"
+            );
+            assert_eq!(
+                evaluate_condition_with_duties(&rule(metric), &aggregate, &duties),
+                expected >= 2
+            );
+        }
+        let mut single = rule("pauseMinutes");
+        if let AchievementCondition::Metric {
+            within_single_duty,
+            value,
+            ..
+        } = &mut single
+        {
+            *within_single_duty = true;
+            *value = 30;
+        }
+        assert!(!evaluate_condition_with_duties(
+            &single, &aggregate, &duties
+        ));
+        assert_eq!(condition_progress(&single, &aggregate, &duties).0, 20);
+        let mut full = rule("fullDutyLines");
+        if let AchievementCondition::Metric {
+            lines, consecutive, ..
+        } = &mut full
+        {
+            *lines = vec!["20".into()];
+            *consecutive = true;
+        }
+        assert!(!evaluate_condition_with_duties(&full, &aggregate, &duties));
+        assert_eq!(condition_progress(&full, &aggregate, &duties).0, 1);
+        let mut combined = rule("dutyCount");
+        if let AchievementCondition::Metric { division_id, .. } = &mut combined {
+            *division_id = Some("other".into());
+        }
+        assert_eq!(condition_progress(&combined, &aggregate, &duties).0, 0);
+        let group = AchievementCondition::Group {
+            operator: "all".into(),
+            conditions: vec![rule("dutyCount")],
+        };
+        assert!(evaluate_condition_with_duties(&group, &aggregate, &duties));
+        assert_eq!(condition_progress(&group, &aggregate, &duties).0, 2);
+    }
+
+    #[test]
     fn single_duty_and_consecutive_duty_conditions_use_duty_boundaries() {
         let aggregate = PersonalStatistics {
             pause_minutes: 120,
@@ -1584,6 +1841,7 @@ mod tests {
         let duty = |date: &str, line: &str, pause_minutes: i64, material: &str| {
             DutyAchievementStatistics {
                 operational_date: date.into(),
+                depot: None,
                 start_minute: 600,
                 division_id: "zhn".into(),
                 statistics: PersonalStatistics {
@@ -1609,6 +1867,7 @@ mod tests {
             duty("2026-08-04", "1", 0, "Yutong 15m"),
         ];
         let duties_in_zhn = AchievementCondition::Metric {
+            depot: None,
             metric: "dutyCount".into(),
             lines: vec![],
             material_types: vec![],
@@ -1630,6 +1889,7 @@ mod tests {
         );
 
         let two_hours_pause_in_one_duty = AchievementCondition::Metric {
+            depot: None,
             metric: "pauseMinutes".into(),
             lines: vec![],
             material_types: vec![],
@@ -1647,6 +1907,7 @@ mod tests {
         ));
 
         let two_city_duties_in_a_row = AchievementCondition::Metric {
+            depot: None,
             metric: "fullDutyLines".into(),
             lines: vec!["1".into(), "2".into()],
             material_types: vec![],
@@ -1664,6 +1925,7 @@ mod tests {
         ));
 
         let full_yutong_duties = AchievementCondition::Metric {
+            depot: None,
             metric: "fullDutyMaterial".into(),
             lines: vec![],
             material_types: vec!["Yutong 15m".into()],
@@ -1679,6 +1941,69 @@ mod tests {
             &aggregate,
             &duties,
         ));
+    }
+
+    #[tokio::test]
+    async fn personal_schedules_are_private_and_deletion_preserves_confirmed_history() {
+        let connection = Connection::open_in_memory().unwrap();
+        connection.execute_batch("PRAGMA foreign_keys=ON; CREATE TABLE accounts(id TEXT PRIMARY KEY); INSERT INTO accounts VALUES ('a'),('b'); CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at INTEGER);").unwrap();
+        migrate(&connection).unwrap();
+        let store = PersonalDataStore {
+            connection: Arc::new(Mutex::new(connection)),
+        };
+        let schedule = PersonalSchedule {
+            id: "personal-one".into(),
+            operational_date: "2026-09-18".into(),
+            division_id: "lkn".into(),
+            parse_result: serde_json::json!({"diensten":[{"serviceNumber":"L-7034"}]}),
+        };
+        store.save_personal_schedule("a", &schedule).await.unwrap();
+        assert!(store.save_personal_schedule("a", &schedule).await.is_err());
+        assert_eq!(store.personal_schedules("a").await.unwrap().len(), 1);
+        assert!(store.personal_schedules("b").await.unwrap().is_empty());
+        assert!(!store
+            .delete_personal_schedule("b", &schedule.id)
+            .await
+            .unwrap());
+        let snapshot = DutySnapshot {
+            depot: Some("Katwijk, Garage".into()),
+            operational_date: schedule.operational_date.clone(),
+            source_file_id: schedule.id.clone(),
+            source_content_hash: None,
+            division_id: "lkn".into(),
+            service_number: "L-7034".into(),
+            start_minute: 937,
+            end_minute: 1470,
+            origin: "guidance".into(),
+            segments: vec![DutySegmentSnapshot {
+                movement_type: "rit".into(),
+                line_number: Some("400".into()),
+                trip_number: None,
+                material_type: None,
+                start_minute: 1412,
+                end_minute: 1460,
+                source_movement_id: "m1".into(),
+                unpaid: false,
+            }],
+        };
+        store.confirm_duty("a", snapshot.clone()).await.unwrap();
+        assert!(store
+            .delete_personal_schedule("a", &schedule.id)
+            .await
+            .unwrap());
+        assert_eq!(store.list_duties("a").await.unwrap().len(), 1);
+        assert_eq!(
+            store.export_duties("a").await.unwrap()[0].duration_minutes,
+            Some(48)
+        );
+        assert!(store.list_duties("b").await.unwrap().is_empty());
+        let mut reupload = snapshot;
+        reupload.source_file_id = "personal-two".into();
+        assert!(store
+            .confirm_duty("a", reupload)
+            .await
+            .unwrap_err()
+            .contains("al bevestigd"));
     }
 
     #[tokio::test]
@@ -1704,6 +2029,7 @@ mod tests {
                 "account-1",
                 DutySnapshot {
                     operational_date: "2026-08-09".into(),
+                    depot: Some("Lisse, Garage".into()),
                     source_file_id: "file-1".into(),
                     source_content_hash: Some("hash".into()),
                     division_id: "zhn".into(),
@@ -1752,6 +2078,7 @@ mod tests {
                 "account-1",
                 DutySnapshot {
                     operational_date: "2026-08-10".into(),
+                    depot: None,
                     source_file_id: "file-2".into(),
                     source_content_hash: Some("hash-2".into()),
                     division_id: "gd".into(),
@@ -1773,6 +2100,29 @@ mod tests {
             )
             .await
             .expect("confirm second duty");
+        assert_eq!(record.depot.as_deref(), Some("Lisse, Garage"));
+        assert!(second.depot.is_none());
+        let exported = store
+            .export_duties("account-1")
+            .await
+            .expect("export with depot");
+        assert!(exported
+            .iter()
+            .filter(|row| row.source_file_id == "file-1")
+            .all(|row| row.depot.as_deref() == Some("Lisse, Garage")));
+        let listed = store
+            .list_duties("account-1")
+            .await
+            .expect("list with depot");
+        assert_eq!(
+            listed
+                .iter()
+                .find(|duty| duty.id == record.id)
+                .unwrap()
+                .depot
+                .as_deref(),
+            Some("Lisse, Garage")
+        );
         let statistics = store.statistics("account-1").await.expect("statistics");
         assert_eq!(statistics.duty_count, 2);
         assert_eq!(statistics.total_line_minutes, 90);
@@ -1810,6 +2160,7 @@ mod tests {
                 badge: "R".into(),
                 enabled: true,
                 condition: AchievementCondition::Metric {
+                    depot: None,
                     metric: "totalMinutes".into(),
                     lines: vec![],
                     material_types: vec![],
@@ -1838,6 +2189,7 @@ mod tests {
                 badge: "G".into(),
                 enabled: true,
                 condition: AchievementCondition::Metric {
+                    depot: None,
                     metric: "dutyCount".into(),
                     lines: vec![],
                     material_types: vec![],

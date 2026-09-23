@@ -29,6 +29,9 @@ import { appConfig } from "./appConfig";
 import AccountPage, { AccountManagement } from "./AccountPage";
 import { AchievementManagement } from "./PersonalDataPanel";
 import DutyConfirmation from "./DutyConfirmation";
+import { belongsToLockedDuty } from "./lockedDuty";
+import PersonalScheduleUpload from "./PersonalScheduleUpload";
+import { listPersonalSchedules, personalScheduleLive, type PersonalSchedule } from "./personalSchedules";
 import { accountsAvailable, getSetupStatus, logout, restoreSession, type AuthSession } from "./auth";
 import WageSettingsPanel from "./wage/WageSettingsPanel";
 import { calculateDutyWage } from "./wage/calculate";
@@ -195,6 +198,47 @@ function App() {
   const [authSetupRequired, setAuthSetupRequired] = useState(false);
   const [authError, setAuthError] = useState<string>();
   const [wageSettings, setWageSettings] = useState<WageSettings>();
+  const [personalData, setPersonalData] = useState<{ accountId: string; schedules: PersonalSchedule[] }>();
+  const [personalSelection, setPersonalSelection] = useState<string>();
+  const [personalLive, setPersonalLive] = useState<{ id: string; response: LiveStatusResponse }>();
+  const personalSchedules = personalData?.accountId === authSession?.account.id ? personalData?.schedules ?? [] : [];
+  const availablePersonalSchedules = personalSchedules.filter((s) => s.operationalDate === selectedDate);
+  const loadedPersonalSchedule = availablePersonalSchedules.find((s) => s.id === personalSelection);
+
+  async function reloadPersonalSchedules() {
+    if (!authSession) return;
+    try { setPersonalData({ accountId: authSession.account.id, schedules: await listPersonalSchedules() }); }
+    catch (error) { setStorageError(error instanceof Error ? error.message : String(error)); }
+  }
+
+  useEffect(() => {
+    let cancelled = false;
+    setPersonalData(undefined); setPersonalSelection(undefined); setPersonalLive(undefined);
+    if (authSession) void listPersonalSchedules().then((schedules) => {
+      if (!cancelled) setPersonalData({ accountId: authSession.account.id, schedules });
+    }).catch((error) => { if (!cancelled) setStorageError(String(error)); });
+    return () => { cancelled = true; };
+  }, [authSession?.account.id]);
+
+  useEffect(() => {
+    let cancelled = false;
+    const id = loadedPersonalSchedule?.id;
+    let timer: number | undefined;
+    setPersonalLive(undefined);
+    if (!id || !isPageVisible || selectedDate !== todayInputValue()) return;
+    async function refresh() {
+      try {
+        const response = await personalScheduleLive(id!);
+        if (!cancelled) setPersonalLive({ id: id!, response });
+      } catch (error) {
+        if (!cancelled) setPersonalLive({ id: id!, response: { statuses: [], sync: { state: "unavailable", message: String(error) } } });
+      } finally {
+        if (!cancelled) timer = window.setTimeout(() => void refresh(), appConfig.live.refreshIntervalSeconds * 1000);
+      }
+    }
+    void refresh();
+    return () => { cancelled = true; window.clearTimeout(timer); };
+  }, [loadedPersonalSchedule?.id, selectedDate, isPageVisible]);
 
   const selectedDaySegment = useMemo(() => daySegmentForDate(selectedDate), [selectedDate]);
   const selectedScheduleScope = useMemo(
@@ -795,24 +839,31 @@ function App() {
           canManageServer={!accountsAvailable() || authSession?.account.role === "admin"}
           isAdmin={authSession?.account.role === "admin"}
           currentAccountId={authSession?.account.id}
+          personalSchedulePanel={authSession ? <PersonalScheduleUpload key={authSession.account.id} schedules={personalSchedules} divisions={organization.divisions} knownServices={allServices} onChange={reloadPersonalSchedules} /> : undefined}
           wageSettings={authSession ? wageSettings : undefined}
           onWageSettingsChange={saveLocalWageSettings}
           onWageSettingsDelete={removeLocalWageSettings}
         />
       ) : page === "guidance" ? (
         <DutyGuidance
-          services={allServices}
-          movements={allMovements}
-          selectedServiceNumber={guidanceServiceNumber}
-          onSelectService={setGuidanceServiceNumber}
-          liveStatuses={liveResponse.statuses}
-          liveSync={liveResponse.sync}
+          services={loadedPersonalSchedule ? loadedPersonalSchedule.parseResult.diensten : allServices}
+          movements={loadedPersonalSchedule ? [...allMovements, ...loadedPersonalSchedule.parseResult.movements] : allMovements}
+          selectedServiceNumber={loadedPersonalSchedule?.parseResult.diensten[0].serviceNumber ?? guidanceServiceNumber}
+          onSelectService={(value) => { setPersonalSelection(undefined); setGuidanceServiceNumber(value); }}
+          liveStatuses={loadedPersonalSchedule && personalLive?.id === loadedPersonalSchedule.id ? [...liveResponse.statuses, ...personalLive.response.statuses] : liveResponse.statuses}
+          liveSync={loadedPersonalSchedule && personalLive?.id === loadedPersonalSchedule.id ? personalLive.response.sync : liveResponse.sync}
+          personalScheduleControls={availablePersonalSchedules.length > 0 ? <div className="personal-guidance-controls">
+            {availablePersonalSchedules.length === 1
+              ? <button className="secondary-button" onClick={() => { setPersonalSelection(availablePersonalSchedules[0].id); setGuidanceLocked(false); }}>Laad persoonlijke dienst</button>
+              : <label>Laad persoonlijke dienst<select value={loadedPersonalSchedule?.id ?? ""} onChange={(event) => { setPersonalSelection(event.target.value || undefined); setGuidanceLocked(false); }}><option value="">Kies dienst</option>{availablePersonalSchedules.map((s) => <option key={s.id} value={s.id}>{s.parseResult.diensten[0].serviceNumber}</option>)}</select></label>}
+            {loadedPersonalSchedule && <button className="icon-button" title="Terug naar gewone diensten" aria-label="Terug naar gewone diensten" onClick={() => { setPersonalSelection(undefined); setGuidanceLocked(false); }}><X size={17} /></button>}
+          </div> : undefined}
           currentTime={guidanceCurrentTime}
           liveCurrentTime={currentTime}
           timeOverride={guidanceTimeOverride}
           onTimeOverride={setGuidanceTimeOverride}
           isLocked={guidanceLocked}
-          onLockedChange={updateGuidanceLock}
+          onLockedChange={loadedPersonalSchedule ? setGuidanceLocked : updateGuidanceLock}
           isDemo={false}
           isToday={isToday}
           selectedDate={selectedDate}
@@ -865,6 +916,11 @@ function App() {
           ) : filteredMovements.length > 0 && page === "loops" ? (
             <>
               <TimelineChart
+                highlightedMovementIds={new Set(timelineMovements.filter((movement) => guidanceLocked && belongsToLockedDuty(
+                  movement,
+                  loadedPersonalSchedule?.parseResult.diensten[0] ?? allServices.find((service) => service.serviceNumber.toLowerCase() === guidanceServiceNumber.trim().toLowerCase()),
+                  loadedPersonalSchedule?.parseResult.movements,
+                )).map((movement) => movement.id))}
                 loops={timelineLoops}
                 movements={timelineMovements}
                 frameHours={frameHours}
@@ -1019,6 +1075,7 @@ function SettingsPage({
   canManageServer,
   isAdmin,
   currentAccountId,
+  personalSchedulePanel,
   wageSettings,
   onWageSettingsChange,
   onWageSettingsDelete,
@@ -1049,6 +1106,7 @@ function SettingsPage({
   canManageServer: boolean;
   isAdmin: boolean;
   currentAccountId?: string;
+  personalSchedulePanel?: ReactNode;
   wageSettings?: WageSettings;
   onWageSettingsChange: (settings: WageSettings) => Promise<void>;
   onWageSettingsDelete: () => Promise<void>;
@@ -1227,6 +1285,7 @@ function SettingsPage({
 
       <div className={["files", "accounts", "achievements"].includes(settingsTab) ? "settings-content settings-content-wide" : "settings-content"}>
         {settingsTab === "general" && (
+          <>
           <section className="settings-group">
             <div className="settings-group-heading">
               <div>
@@ -1239,6 +1298,8 @@ function SettingsPage({
               </button>
             </div>
           </section>
+          {personalSchedulePanel}
+          </>
         )}
 
         {canManageServer && settingsTab === "files" && (
@@ -2278,6 +2339,7 @@ function formatLiveAge(seconds: number): string {
 }
 
 function DutyGuidance({
+  personalScheduleControls,
   services,
   movements,
   selectedServiceNumber,
@@ -2295,6 +2357,7 @@ function DutyGuidance({
   ortRates,
   personalEnabled,
 }: {
+  personalScheduleControls?: ReactNode;
   services: Dienst[];
   movements: Movement[];
   selectedServiceNumber: string;
@@ -2317,7 +2380,8 @@ function DutyGuidance({
   const serviceNumbers = [...new Set(services.map((service) => service.serviceNumber))].sort((a, b) => serviceSortKey(a) - serviceSortKey(b));
   const selectedService = services.find((service) => service.serviceNumber.toLowerCase() === selectedServiceNumber.trim().toLowerCase());
   const serviceMovements = selectedService
-    ? movements.filter((movement) => movement.dienstnummer === selectedService.serviceNumber)
+    ? movements.filter((movement) => movement.dienstnummer === selectedService.serviceNumber
+      && (!selectedService.sourceFileId || movement.sourceFileId === selectedService.sourceFileId))
     : [];
   const entries = buildGuidanceEntries(serviceMovements);
   const statusByMovementId = new Map(liveStatuses.map((status) => [status.movementId, status]));
@@ -2394,6 +2458,7 @@ function DutyGuidance({
           <span>{isLocked ? <Lock size={17} /> : <LockOpen size={17} />}</span>
           <strong>{isLocked ? "Vastgezet" : "Vastzetten"}</strong>
         </label>
+        {personalScheduleControls}
       </section>
 
       {!selectedService ? (
@@ -2600,6 +2665,7 @@ function GuidanceTakeover({ takeover, live, arrival, currentMinute }: { takeover
 }
 
 function TimelineChart({
+  highlightedMovementIds,
   loops,
   movements,
   frameHours,
@@ -2607,6 +2673,7 @@ function TimelineChart({
   liveStatuses,
   currentTime,
 }: {
+  highlightedMovementIds: Set<string>;
   loops: string[];
   movements: Movement[];
   frameHours: number;
@@ -2843,6 +2910,7 @@ function TimelineChart({
           >
             {loops.map((loop) => (
               <TimelineRow
+                highlightedMovementIds={highlightedMovementIds}
                 key={loop}
                 loop={loop}
                 movements={movements.filter((movement) => loopKey(movement) === loop)}
@@ -2871,6 +2939,7 @@ function TimelineChart({
 }
 
 function TimelineRow({
+  highlightedMovementIds,
   loop,
   movements,
   rangeStart,
@@ -2881,6 +2950,7 @@ function TimelineRow({
   liveStatusByMovementId,
   onSelectMovement,
 }: {
+  highlightedMovementIds: Set<string>;
   loop: string;
   movements: Movement[];
   rangeStart: number;
@@ -2952,6 +3022,7 @@ function TimelineRow({
 
         {timedMovements.map(({ movement, timing }) => (
           <MovementBlock
+            isLockedDuty={highlightedMovementIds.has(movement.id)}
             key={movement.id}
             movement={movement}
             left={(timing.start - rangeStart) * minuteWidth}
@@ -3003,6 +3074,7 @@ function liveInfoForLoop(
 }
 
 function MovementBlock({
+  isLockedDuty,
   movement,
   left,
   width,
@@ -3011,6 +3083,7 @@ function MovementBlock({
   splitTripSizingWidth,
   onSelect,
 }: {
+  isLockedDuty: boolean;
   movement: Movement;
   left: number;
   width: number;
@@ -3061,6 +3134,7 @@ function MovementBlock({
     <article
       className={[
         "movement-block",
+        isLockedDuty ? "is-locked-duty" : "",
         `type-${movement.type}`,
         continuesFromPrevious ? "continues-previous" : "",
         continuesToNext ? "continues-next" : "",
