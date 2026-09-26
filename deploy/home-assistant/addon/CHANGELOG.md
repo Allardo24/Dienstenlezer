@@ -1,5 +1,9 @@
 # Wijzigingen
 
+## 1.4.9
+
+- Diensten uploaden op telefoon zou nu moeten werken
+
 ## 1.4.8
 
 - Ondersteuning voor persoonlijke diensten toegevoegd: nu kan een gebruiker zelf een eenmalige dienst uploaden en gebruiken

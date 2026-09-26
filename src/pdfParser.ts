@@ -2,6 +2,7 @@ import * as pdfjsLib from "pdfjs-dist/legacy/build/pdf.mjs";
 import pdfWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import { detectMovementColumnLayout, isBuslessDriverRow, textInMovementColumn } from "./pdfColumns";
 import { extractMaterialType, isVehicleMovement, propagateMaterialByLoop } from "./materialType";
+import { readPdfTextItems } from "./pdfText";
 import type { Dienst, Movement, MovementType, ParseResult, TextItem } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
@@ -44,8 +45,8 @@ async function parsePdfFile(file: File): Promise<ParseResult> {
 
     for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
       const page = await pdf.getPage(pageNumber);
-      const textContent = await page.getTextContent();
-      const items = normaliseItems(textContent.items as PdfTextContentItem[]);
+      const textItems = await readPdfTextItems(page);
+      const items = normaliseItems(textItems as PdfTextContentItem[]);
 
       if (items.length === 0) {
         warnings.push(`${file.name} pagina ${pageNumber}: geen tekstlaag gevonden.`);
