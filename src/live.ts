@@ -5,7 +5,7 @@ import { appConfig } from "./appConfig";
 
 const webLiveEtags = new Map<string, string>();
 const webLiveResponses = new Map<string, LiveStatusResponse>();
-const LIVE_CACHE_PREFIX = "dienstenlezer-live-v1:";
+const LIVE_CACHE_PREFIX = "dienstenlezer-live-v2:";
 const LIVE_CACHE_MAX_AGE_MS = appConfig.live.browserCacheHours * 60 * 60 * 1000;
 
 type StoredLiveResponse = {
@@ -44,7 +44,7 @@ export function getCachedQbuzzLiveStatuses(
 }
 
 function storeCachedQbuzzLiveStatuses(date: string, divisionIds: string[], response: LiveStatusResponse) {
-  if (typeof window === "undefined") {
+  if (typeof window === "undefined" || response.sync.state !== "ready") {
     return;
   }
 
@@ -88,7 +88,7 @@ export async function getQbuzzLiveStatuses(
   }
   const params = new URLSearchParams({ date });
   params.set("divisions", [...new Set(divisionIds)].sort().join(","));
-  const response = await fetchWithRetry(serverUrl(`/api/qbuzz/live?${params}`), {
+  const response = await fetchWithRetry(serverUrl(`/api/live?${params}`), {
     method: "GET",
     headers,
     cache: "no-cache",
@@ -102,7 +102,6 @@ export async function getQbuzzLiveStatuses(
         ...cached,
         sync: {
           ...cached.sync,
-          state: "ready" as const,
           fetchedAt: Number.isFinite(fetchedAt) ? fetchedAt : cached.sync.fetchedAt,
         },
       };

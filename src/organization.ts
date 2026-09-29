@@ -14,7 +14,8 @@ export function normalizeOrganization(config?: OrganizationConfig): Organization
   }
 
   const concessions = uniqueById(config.concessions ?? [])
-    .map((concession) => ({ id: concession.id.trim(), name: concession.name.trim() }))
+    .map((concession) => ({ id: concession.id.trim(), name: concession.name.trim(),
+      operator: concession.operator === "transdev" ? "transdev" as const : "qbuzz" as const }))
     .filter((concession) => concession.id && concession.name);
   const concessionIds = new Set(concessions.map((concession) => concession.id));
   const divisions = uniqueById(config.divisions ?? [])

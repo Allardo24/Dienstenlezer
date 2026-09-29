@@ -1,5 +1,5 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     fs::File,
     io::BufReader,
     path::{Path, PathBuf},
@@ -18,13 +18,13 @@ use zip::ZipArchive;
 
 const GTFS_DIRECTORY_URL: &str = "https://gtfs.ovapi.nl/nl/";
 const GTFS_BASE_URL: &str = "https://gtfs.ovapi.nl/nl/";
-const TRIP_UPDATES_URL: &str = "https://gtfs.ovapi.nl/nl/tripUpdates.pb";
-const VEHICLE_POSITIONS_URL: &str = "https://gtfs.ovapi.nl/nl/vehiclePositions.pb";
+const TRIP_UPDATES_URL: &str = "https://gtfs.openov.nl/gtfs-rt/tripUpdates.pb";
+const VEHICLE_POSITIONS_URL: &str = "https://gtfs.openov.nl/gtfs-rt/vehiclePositions.pb";
 const INDEX_MAX_AGE_SECONDS: i64 = 7 * 24 * 60 * 60;
 const INDEX_REFRESH_RETRY_SECONDS: i64 = 60 * 60;
-const LIVE_INDEX_VERSION: u8 = 5;
+const LIVE_INDEX_VERSION: u8 = 6;
 const REALTIME_CACHE_SECONDS: i64 = 25;
-const APP_USER_AGENT: &str = "DienstenLezer/1.0 (lokale Qbuzz-omloopweergave)";
+const APP_USER_AGENT: &str = "DienstenLezer/1.0 (lokale omloopweergave)";
 const VEHICLE_STATUS_STOPPED_AT: i32 = 1;
 const VEHICLE_STATUS_IN_TRANSIT_TO: i32 = 2;
 
@@ -32,6 +32,8 @@ const VEHICLE_STATUS_IN_TRANSIT_TO: i32 = 2;
 #[serde(rename_all = "camelCase")]
 pub struct LiveMovementRequest {
     pub movement_id: String,
+    #[serde(default = "default_operator")]
+    pub operator: String,
     pub line_number: Option<String>,
     pub trip_number: Option<String>,
     pub departure: String,
@@ -46,6 +48,7 @@ pub struct LiveMovementRequest {
 #[serde(rename_all = "camelCase")]
 pub struct LiveMovementStatus {
     movement_id: String,
+    operator: String,
     matched: bool,
     delay_seconds: Option<i32>,
     handover_delay_seconds: Option<i32>,
@@ -113,7 +116,7 @@ pub struct LiveRuntime {
 impl LiveRuntime {
     pub fn new(cache_directory: PathBuf) -> Result<Self, String> {
         std::fs::create_dir_all(&cache_directory)
-            .map_err(|error| format!("Qbuzz-cachemap kon niet worden gemaakt: {error}"))?;
+            .map_err(|error| format!("Live-cachemap kon niet worden gemaakt: {error}"))?;
         Ok(Self {
             cache_directory,
             progress_handler: None,
@@ -175,6 +178,8 @@ impl LiveIndex {
 
 #[derive(Debug, Serialize, Deserialize)]
 struct QbuzzTrip {
+    #[serde(default = "default_operator")]
+    operator: String,
     trip_id: String,
     realtime_trip_id: String,
     line: String,
@@ -200,11 +205,16 @@ struct CalendarRule {
 
 #[derive(Debug)]
 struct TripSeed {
+    operator: String,
     trip_id: String,
     realtime_trip_id: String,
     line: String,
     trip_number: String,
     service_id: String,
+}
+
+fn default_operator() -> String {
+    "qbuzz".to_owned()
 }
 
 #[derive(Debug)]
@@ -232,7 +242,7 @@ impl Default for TripBounds {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RealtimeUpdate {
     delay_seconds: Option<i32>,
     vehicle_id: Option<String>,
@@ -240,7 +250,7 @@ struct RealtimeUpdate {
     stop_predictions: Vec<RealtimeStopPrediction>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct RealtimeStopPrediction {
     stop_id: String,
     stop_sequence: Option<u32>,
@@ -250,7 +260,7 @@ struct RealtimeStopPrediction {
     departure_expected_at: Option<i64>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct VehicleRealtimePosition {
     vehicle_id: String,
     current_stop_sequence: Option<u32>,
@@ -269,8 +279,27 @@ pub async fn get_live_statuses(
     date: String,
     movements: Vec<LiveMovementRequest>,
 ) -> Result<LiveStatusResponse, String> {
-    let index = ensure_index(runtime, &date).await?;
-    let realtime = realtime_feeds(runtime).await?;
+    if movements.is_empty() {
+        return Ok(unavailable_live_response(
+            0,
+            "Geen ritten in het actuele tijdvenster.",
+            None,
+        ));
+    }
+    let index = match ensure_index(runtime, &date).await {
+        Ok(index) => index,
+        Err(error) => return Ok(unavailable_live_response(movements.len(), &error, None)),
+    };
+    let realtime = match realtime_feeds(runtime).await {
+        Ok(realtime) => realtime,
+        Err(error) => {
+            return Ok(unavailable_live_response(
+                movements.len(),
+                &error,
+                Some(index.indexed_at),
+            ))
+        }
+    };
     let updates = &realtime.updates;
     let vehicle_positions = &realtime.vehicle_positions;
 
@@ -340,6 +369,7 @@ pub async fn get_live_statuses(
 
         statuses.push(LiveMovementStatus {
             movement_id: movement.movement_id.clone(),
+            operator: movement.operator.clone(),
             matched: trip.is_some(),
             delay_seconds: current_delay_seconds,
             handover_delay_seconds,
@@ -377,6 +407,30 @@ pub async fn get_live_statuses(
     })
 }
 
+fn unavailable_live_response(
+    requested: usize,
+    reason: &str,
+    indexed_at: Option<i64>,
+) -> LiveStatusResponse {
+    LiveStatusResponse {
+        statuses: Vec::new(),
+        sync: LiveSyncState {
+            state: "unavailable".to_owned(),
+            message: if requested == 0 {
+                reason.to_owned()
+            } else {
+                format!("Livegegevens tijdelijk niet beschikbaar: {reason}")
+            },
+            indexed_at,
+            fetched_at: None,
+        },
+        diagnostics: LiveDiagnostics {
+            requested,
+            ..LiveDiagnostics::default()
+        },
+    }
+}
+
 fn live_sync_state(
     indexed_at: i64,
     fetched_at: i64,
@@ -384,9 +438,9 @@ fn live_sync_state(
 ) -> LiveSyncState {
     if diagnostics.matched == 0 {
         let message = if diagnostics.requested == 0 {
-            "Geen pdf-ritten binnen twee uur voor of na nu om aan Qbuzz te koppelen."
+            "Geen pdf-ritten binnen twee uur voor of na nu om live te koppelen."
         } else {
-            "Binnen het huidige tijdvenster zijn geen passende Qbuzz-ritten gekoppeld. De pdf-diensten blijven leidend."
+            "Binnen het huidige tijdvenster zijn geen passende live-ritten gekoppeld. De pdf-diensten blijven leidend."
         };
         return LiveSyncState {
             state: "unavailable".to_owned(),
@@ -399,7 +453,7 @@ fn live_sync_state(
     LiveSyncState {
         state: "ready".to_owned(),
         message: format!(
-            "Qbuzz live: {} ritten gekoppeld, realtime elke 30 seconden ververst.",
+            "Live: {} ritten gekoppeld, realtime elke 30 seconden ververst.",
             diagnostics.matched
         ),
         indexed_at: Some(indexed_at),
@@ -563,8 +617,8 @@ async fn realtime_feeds(runtime: &LiveRuntime) -> Result<Arc<CachedRealtimeFeeds
 
     let previous = cached.as_ref().map(Arc::clone);
     let (updates_result, positions_result) = tokio::join!(
-        fetch_realtime_feed(TRIP_UPDATES_URL, "Qbuzz realtime-feed"),
-        fetch_realtime_feed(VEHICLE_POSITIONS_URL, "Qbuzz voertuigposities"),
+        fetch_realtime_feed(TRIP_UPDATES_URL, "Realtime-feed"),
+        fetch_realtime_feed(VEHICLE_POSITIONS_URL, "Voertuigposities"),
     );
     let updates = match updates_result.and_then(|bytes| decode_trip_updates(&bytes)) {
         Ok(updates) => updates,
@@ -618,7 +672,7 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
     if archive_is_fresh(&archive_path, now) {
         runtime.report_progress(
             "syncing",
-            "Bestaande Qbuzz-dienstregeling lokaal indexeren...",
+            "Bestaande dienstregeling lokaal indexeren...",
             None,
         );
         let archive_for_index = archive_path.clone();
@@ -626,12 +680,12 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
             build_qbuzz_index(&archive_for_index, String::new())
         })
         .await
-        .map_err(|error| format!("Qbuzz-index taak is afgebroken: {error}"))??;
+        .map_err(|error| format!("Live-index taak is afgebroken: {error}"))??;
         write_index(&index_path, &index)?;
         runtime.report_progress(
             "ready",
             &format!(
-                "Qbuzz-index gereed: {} ritten lokaal beschikbaar.",
+                "Live-index gereed: {} ritten lokaal beschikbaar.",
                 index.trips.len()
             ),
             Some(index.indexed_at),
@@ -641,14 +695,14 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
         return Ok(index);
     }
 
-    runtime.report_progress("syncing", "Qbuzz-dienstregeling wordt gedownload...", None);
+    runtime.report_progress("syncing", "Dienstregeling wordt gedownload...", None);
     if let Err(error) = download_gtfs(runtime, &archive_path).await {
         *runtime.index_refresh_retry_after.lock().await = now + INDEX_REFRESH_RETRY_SECONDS;
         if let Some(index) = fallback_index {
             runtime.report_progress(
                 "ready",
                 &format!(
-                    "Actuele Qbuzz-dienstregeling kon niet worden opgehaald; de bestaande index blijft tijdelijk actief. {error}"
+                    "Actuele dienstregeling kon niet worden opgehaald; de bestaande index blijft tijdelijk actief. {error}"
                 ),
                 Some(index.indexed_at),
             );
@@ -658,18 +712,18 @@ async fn ensure_index(runtime: &LiveRuntime, _date: &str) -> Result<Arc<LiveInde
         return Err(error);
     }
     *runtime.index_refresh_retry_after.lock().await = 0;
-    runtime.report_progress("syncing", "Qbuzz-dienstregeling wordt geindexeerd...", None);
+    runtime.report_progress("syncing", "Dienstregeling wordt geindexeerd...", None);
 
     let archive_for_index = archive_path.clone();
     let index =
         tokio::task::spawn_blocking(move || build_qbuzz_index(&archive_for_index, String::new()))
             .await
-            .map_err(|error| format!("Qbuzz-index taak is afgebroken: {error}"))??;
+            .map_err(|error| format!("Live-index taak is afgebroken: {error}"))??;
     write_index(&index_path, &index)?;
     runtime.report_progress(
         "ready",
         &format!(
-            "Qbuzz-index gereed: {} ritten lokaal beschikbaar.",
+            "Live-index gereed: {} ritten lokaal beschikbaar.",
             index.trips.len()
         ),
         Some(index.indexed_at),
@@ -750,15 +804,10 @@ async fn download_gtfs(runtime: &LiveRuntime, destination: &Path) -> Result<(), 
 
         if downloaded >= next_report {
             let message = total.map_or_else(
-                || {
-                    format!(
-                        "Qbuzz-dienstregeling downloaden: {} MB",
-                        downloaded / 1024 / 1024
-                    )
-                },
+                || format!("Dienstregeling downloaden: {} MB", downloaded / 1024 / 1024),
                 |size| {
                     format!(
-                        "Qbuzz-dienstregeling downloaden: {} van {} MB",
+                        "Dienstregeling downloaden: {} van {} MB",
                         downloaded / 1024 / 1024,
                         size / 1024 / 1024
                     )
@@ -836,9 +885,9 @@ fn read_index(path: &Path) -> Result<LiveIndex, String> {
 
 fn write_index(path: &Path, index: &LiveIndex) -> Result<(), String> {
     let contents = serde_json::to_vec(index)
-        .map_err(|error| format!("Qbuzz-index kon niet worden geschreven: {error}"))?;
+        .map_err(|error| format!("Live-index kon niet worden geschreven: {error}"))?;
     std::fs::write(path, contents)
-        .map_err(|error| format!("Qbuzz-index kon niet lokaal worden opgeslagen: {error}"))
+        .map_err(|error| format!("Live-index kon niet lokaal worden opgeslagen: {error}"))
 }
 
 fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex, String> {
@@ -846,9 +895,9 @@ fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex,
         .map_err(|error| format!("GTFS-archief kon niet worden geopend: {error}"))?;
     let mut archive =
         ZipArchive::new(file).map_err(|error| format!("GTFS-archief is ongeldig: {error}"))?;
-    let qbuzz_agencies = read_qbuzz_agencies(&mut archive)?;
+    let agencies = read_live_agencies(&mut archive)?;
     let stops = read_stops(&mut archive)?;
-    let routes = read_qbuzz_routes(&mut archive, &qbuzz_agencies)?;
+    let routes = read_live_routes(&mut archive, &agencies)?;
     let seeds = read_qbuzz_trips(&mut archive, &routes)?;
     let bounds = read_trip_bounds(&mut archive, &seeds)?;
     let calendar = read_calendar(&mut archive)?;
@@ -863,6 +912,7 @@ fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex,
             }
 
             Some(QbuzzTrip {
+                operator: seed.operator,
                 trip_id: seed.trip_id,
                 realtime_trip_id: seed.realtime_trip_id,
                 line: seed.line,
@@ -894,7 +944,7 @@ fn build_qbuzz_index(path: &Path, operational_date: String) -> Result<LiveIndex,
     Ok(index)
 }
 
-fn read_qbuzz_agencies(archive: &mut ZipArchive<File>) -> Result<HashSet<String>, String> {
+fn read_live_agencies(archive: &mut ZipArchive<File>) -> Result<HashMap<String, String>, String> {
     let entry = archive
         .by_name("agency.txt")
         .map_err(|error| format!("agency.txt ontbreekt: {error}"))?;
@@ -902,22 +952,32 @@ fn read_qbuzz_agencies(archive: &mut ZipArchive<File>) -> Result<HashSet<String>
     let headers = reader.headers().map_err(csv_error)?.clone();
     let agency_id = column(&headers, "agency_id")?;
     let agency_name = column(&headers, "agency_name")?;
-    let mut agencies = HashSet::new();
+    let mut agencies = HashMap::new();
 
     for record in reader.records() {
         let record = record.map_err(csv_error)?;
-        if record
-            .get(agency_name)
-            .unwrap_or_default()
-            .to_lowercase()
-            .contains("qbuzz")
+        let name = record.get(agency_name).unwrap_or_default().to_lowercase();
+        let operator = if name.contains("qbuzz") {
+            Some("qbuzz")
+        } else if name.contains("transdev") || name.contains("connexxion") || name.contains("u-ov")
         {
-            agencies.insert(record.get(agency_id).unwrap_or_default().to_owned());
+            Some("transdev")
+        } else {
+            None
+        };
+        if let Some(operator) = operator {
+            agencies.insert(
+                record.get(agency_id).unwrap_or_default().to_owned(),
+                operator.to_owned(),
+            );
         }
     }
 
     if agencies.is_empty() {
-        return Err("Geen Qbuzz-vervoerder gevonden in de actuele GTFS-dienstregeling.".to_owned());
+        return Err(
+            "Geen Qbuzz- of Transdev-vervoerder gevonden in de actuele GTFS-dienstregeling."
+                .to_owned(),
+        );
     }
 
     Ok(agencies)
@@ -944,10 +1004,10 @@ fn read_stops(archive: &mut ZipArchive<File>) -> Result<HashMap<String, String>,
     Ok(stops)
 }
 
-fn read_qbuzz_routes(
+fn read_live_routes(
     archive: &mut ZipArchive<File>,
-    agencies: &HashSet<String>,
-) -> Result<HashMap<String, String>, String> {
+    agencies: &HashMap<String, String>,
+) -> Result<HashMap<String, (String, String)>, String> {
     let entry = archive
         .by_name("routes.txt")
         .map_err(|error| format!("routes.txt ontbreekt: {error}"))?;
@@ -960,10 +1020,13 @@ fn read_qbuzz_routes(
 
     for record in reader.records() {
         let record = record.map_err(csv_error)?;
-        if agencies.contains(record.get(agency_id).unwrap_or_default()) {
+        if let Some(operator) = agencies.get(record.get(agency_id).unwrap_or_default()) {
             routes.insert(
                 record.get(route_id).unwrap_or_default().to_owned(),
-                record.get(route_short_name).unwrap_or_default().to_owned(),
+                (
+                    record.get(route_short_name).unwrap_or_default().to_owned(),
+                    operator.clone(),
+                ),
             );
         }
     }
@@ -973,7 +1036,7 @@ fn read_qbuzz_routes(
 
 fn read_qbuzz_trips(
     archive: &mut ZipArchive<File>,
-    routes: &HashMap<String, String>,
+    routes: &HashMap<String, (String, String)>,
 ) -> Result<HashMap<String, TripSeed>, String> {
     let entry = archive
         .by_name("trips.txt")
@@ -989,7 +1052,7 @@ fn read_qbuzz_trips(
 
     for record in reader.records() {
         let record = record.map_err(csv_error)?;
-        let Some(line) = routes.get(record.get(route_id).unwrap_or_default()) else {
+        let Some((line, operator)) = routes.get(record.get(route_id).unwrap_or_default()) else {
             continue;
         };
         let identifier = record.get(trip_id).unwrap_or_default().to_owned();
@@ -1002,6 +1065,7 @@ fn read_qbuzz_trips(
         trips.insert(
             identifier.clone(),
             TripSeed {
+                operator: operator.clone(),
                 trip_id: identifier,
                 realtime_trip_id: realtime,
                 line: line.clone(),
@@ -1182,7 +1246,7 @@ fn match_attempt<'a>(
     let scheduled_candidates = candidate_indices
         .iter()
         .map(|candidate| &index.trips[*candidate])
-        .filter(|trip| runs_on(index, trip, &date))
+        .filter(|trip| trip.operator == movement.operator && runs_on(index, trip, &date))
         .collect::<Vec<_>>();
     if scheduled_candidates.is_empty() {
         return MatchAttempt::NoLineOrTrip;
@@ -1289,7 +1353,7 @@ fn runs_on(index: &LiveIndex, trip: &QbuzzTrip, date: &str) -> bool {
 
 fn decode_trip_updates(bytes: &[u8]) -> Result<HashMap<String, RealtimeUpdate>, String> {
     let feed = FeedMessage::decode(bytes)
-        .map_err(|error| format!("Qbuzz realtime-feed is ongeldig: {error}"))?;
+        .map_err(|error| format!("Realtime-feed is ongeldig: {error}"))?;
     let feed_timestamp = feed
         .header
         .and_then(|header| header.timestamp)
@@ -1327,18 +1391,19 @@ fn decode_trip_updates(bytes: &[u8]) -> Result<HashMap<String, RealtimeUpdate>, 
             })
             .collect();
         let vehicle_id = update.vehicle.as_ref().and_then(vehicle_identifier);
-        updates.insert(
-            trip.trip_id.clone(),
-            RealtimeUpdate {
-                delay_seconds,
-                vehicle_id,
-                updated_at: update
-                    .timestamp
-                    .map(|value| value as i64)
-                    .or(feed_timestamp),
-                stop_predictions,
-            },
-        );
+        let parsed_update = RealtimeUpdate {
+            delay_seconds,
+            vehicle_id,
+            updated_at: update
+                .timestamp
+                .map(|value| value as i64)
+                .or(feed_timestamp),
+            stop_predictions,
+        };
+        if let Some(alias) = realtime_entity_trip_id(&entity.id) {
+            updates.insert(alias.to_owned(), parsed_update.clone());
+        }
+        updates.insert(trip.trip_id.clone(), parsed_update);
     }
 
     Ok(updates)
@@ -1348,7 +1413,7 @@ fn decode_vehicle_positions(
     bytes: &[u8],
 ) -> Result<HashMap<String, VehicleRealtimePosition>, String> {
     let feed = VehicleFeedMessage::decode(bytes)
-        .map_err(|error| format!("Qbuzz voertuigposities zijn ongeldig: {error}"))?;
+        .map_err(|error| format!("Voertuigposities zijn ongeldig: {error}"))?;
     let mut vehicles = HashMap::new();
 
     for entity in feed.entity {
@@ -1363,19 +1428,26 @@ fn decode_vehicle_positions(
         };
         if let Some(vehicle_id) = vehicle_identifier(&vehicle) {
             if !trip.trip_id.is_empty() {
-                vehicles.insert(
-                    trip.trip_id,
-                    VehicleRealtimePosition {
-                        vehicle_id,
-                        current_stop_sequence: position.current_stop_sequence,
-                        current_status: position.current_status,
-                    },
-                );
+                let parsed_position = VehicleRealtimePosition {
+                    vehicle_id,
+                    current_stop_sequence: position.current_stop_sequence,
+                    current_status: position.current_status,
+                };
+                if let Some(alias) = realtime_entity_trip_id(&entity.id) {
+                    vehicles.insert(alias.to_owned(), parsed_position.clone());
+                }
+                vehicles.insert(trip.trip_id, parsed_position);
             }
         }
     }
 
     Ok(vehicles)
+}
+
+fn realtime_entity_trip_id(entity_id: &str) -> Option<&str> {
+    let (date, trip_id) = entity_id.split_once(':')?;
+    chrono::NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
+    (!trip_id.is_empty()).then_some(trip_id)
 }
 
 fn vehicle_identifier(vehicle: &VehicleDescriptor) -> Option<String> {
@@ -1461,6 +1533,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn openov_fixture_links_transdev_vehicles_when_available() {
+        let (Ok(index_path), Ok(updates_path), Ok(positions_path)) = (
+            std::env::var("TRANSDEV_LIVE_INDEX_FIXTURE"),
+            std::env::var("TRANSDEV_TRIP_UPDATES_FIXTURE"),
+            std::env::var("TRANSDEV_VEHICLE_POSITIONS_FIXTURE"),
+        ) else {
+            return;
+        };
+        let index = read_index(Path::new(&index_path)).unwrap();
+        let updates = decode_trip_updates(&std::fs::read(updates_path).unwrap()).unwrap();
+        let positions = decode_vehicle_positions(&std::fs::read(positions_path).unwrap()).unwrap();
+        let utrecht = index
+            .trips
+            .iter()
+            .filter(|trip| trip.realtime_trip_id.starts_with("CXX:U"));
+        let mut matched_updates = 0;
+        let mut matched_positions = 0;
+        let mut vehicles = 0;
+        for trip in utrecht {
+            let update = updates
+                .get(&trip.realtime_trip_id)
+                .or_else(|| updates.get(&trip.trip_id));
+            let position = positions
+                .get(&trip.realtime_trip_id)
+                .or_else(|| positions.get(&trip.trip_id));
+            matched_updates += usize::from(update.is_some());
+            matched_positions += usize::from(position.is_some());
+            vehicles += usize::from(
+                update.and_then(|item| item.vehicle_id.as_ref()).is_some() || position.is_some(),
+            );
+        }
+        println!("Utrecht Transdev: {matched_updates} tripupdates, {matched_positions} voertuigposities, {vehicles} busnummers");
+        assert!(matched_updates > 0);
+        assert!(vehicles > 0);
+        if let Ok(path) = std::env::var("TRANSDEV_LAGE_WEIDE_IDS_FIXTURE") {
+            let ids: std::collections::HashSet<String> =
+                serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+            let count = index
+                .trips
+                .iter()
+                .filter(|trip| ids.contains(&trip.trip_id))
+                .filter(|trip| {
+                    positions.contains_key(&trip.realtime_trip_id)
+                        || updates
+                            .get(&trip.realtime_trip_id)
+                            .is_some_and(|update| update.vehicle_id.is_some())
+                })
+                .count();
+            println!("Lage Weide: {count} ritten met busnummer");
+            assert!(count > 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn no_movements_do_not_fetch_live_feeds() {
+        let runtime = LiveRuntime {
+            cache_directory: PathBuf::new(),
+            progress_handler: None,
+            realtime_cache: Arc::new(Mutex::new(None)),
+            index_cache: Arc::new(Mutex::new(None)),
+            index_refresh_retry_after: Arc::new(Mutex::new(0)),
+        };
+
+        let response = get_live_statuses(&runtime, "2026-09-29".to_owned(), Vec::new())
+            .await
+            .unwrap();
+
+        assert_eq!(response.sync.state, "unavailable");
+        assert_eq!(response.diagnostics.requested, 0);
+        assert!(response.statuses.is_empty());
+    }
+
+    #[test]
+    fn a_feed_failure_returns_an_unavailable_response() {
+        let response = unavailable_live_response(3, "tijdelijke feedfout", Some(10));
+
+        assert_eq!(response.sync.state, "unavailable");
+        assert!(response.sync.message.contains("tijdelijke feedfout"));
+        assert_eq!(response.diagnostics.requested, 3);
+        assert_eq!(response.sync.indexed_at, Some(10));
+    }
+
+    #[test]
     fn zero_matches_are_unavailable_instead_of_a_feed_error() {
         let diagnostics = LiveDiagnostics {
             requested: 12,
@@ -1513,6 +1668,7 @@ mod tests {
     fn request() -> LiveMovementRequest {
         LiveMovementRequest {
             movement_id: "movement-1".to_owned(),
+            operator: "qbuzz".to_owned(),
             line_number: Some("366".to_owned()),
             trip_number: Some("1004".to_owned()),
             departure: "07:00".to_owned(),
@@ -1545,6 +1701,7 @@ mod tests {
     #[test]
     fn matches_a_unique_qbuzz_trip() {
         let index = index_with_trip(QbuzzTrip {
+            operator: "qbuzz".to_owned(),
             trip_id: "trip-1".to_owned(),
             realtime_trip_id: "rt-1".to_owned(),
             line: "366".to_owned(),
@@ -1568,8 +1725,62 @@ mod tests {
     }
 
     #[test]
+    fn matches_only_the_selected_operator() {
+        let mut index = index_with_trip(QbuzzTrip {
+            operator: "transdev".to_owned(),
+            trip_id: "transdev-trip".to_owned(),
+            realtime_trip_id: "transdev-trip".to_owned(),
+            line: "366".to_owned(),
+            trip_number: "1004".to_owned(),
+            service_id: "service".to_owned(),
+            departure: "07:00".to_owned(),
+            arrival: "07:36".to_owned(),
+            from: "Leiden Centraal".to_owned(),
+            to: "Weteringbrug".to_owned(),
+            from_stop_id: "stop-a".to_owned(),
+            first_stop_sequence: 1,
+            handover_arrival: "06:58".to_owned(),
+            to_stop_id: "stop-z".to_owned(),
+            last_stop_sequence: 99,
+        });
+        assert!(match_trip(&index, &request(), "2026-07-11").is_none());
+        let mut transdev_request = request();
+        transdev_request.operator = "transdev".to_owned();
+        assert_eq!(
+            match_trip(&index, &transdev_request, "2026-07-11").map(|trip| trip.trip_id.as_str()),
+            Some("transdev-trip")
+        );
+        index.trips[0].operator = "qbuzz".to_owned();
+        assert!(match_trip(&index, &transdev_request, "2026-07-11").is_none());
+    }
+
+    #[test]
+    fn cached_national_gtfs_matches_the_transdev_booklet_when_available() {
+        let Ok(path) = std::env::var("TRANSDEV_GTFS_FIXTURE") else {
+            return;
+        };
+        let index = build_qbuzz_index(std::path::Path::new(&path), String::new()).unwrap();
+        let movement = LiveMovementRequest {
+            movement_id: "lage-weide-3001-6-9".to_owned(),
+            operator: "transdev".to_owned(),
+            line_number: Some("6".to_owned()),
+            trip_number: Some("9".to_owned()),
+            departure: "06:47".to_owned(),
+            arrival: "07:09".to_owned(),
+            from: "utr tns".to_owned(),
+            to: "utr jbz".to_owned(),
+            r#type: "rit".to_owned(),
+        };
+        let trip = match_trip(&index, &movement, "2026-09-29")
+            .expect("Transdev-rit ontbreekt in landelijke GTFS");
+        assert_eq!(trip.operator, "transdev");
+        assert_eq!(trip.realtime_trip_id, "CXX:U006:9");
+    }
+
+    #[test]
     fn matches_a_unique_trip_with_a_small_pdf_time_difference() {
         let index = index_with_trip(QbuzzTrip {
+            operator: "qbuzz".to_owned(),
             trip_id: "trip-1".to_owned(),
             realtime_trip_id: "rt-1".to_owned(),
             line: "366".to_owned(),
@@ -1598,6 +1809,7 @@ mod tests {
     #[test]
     fn rejects_ambiguous_qbuzz_trips() {
         let mut index = index_with_trip(QbuzzTrip {
+            operator: "qbuzz".to_owned(),
             trip_id: "trip-1".to_owned(),
             realtime_trip_id: "rt-1".to_owned(),
             line: "366".to_owned(),
@@ -1614,6 +1826,7 @@ mod tests {
             last_stop_sequence: 99,
         });
         index.trips.push(QbuzzTrip {
+            operator: "qbuzz".to_owned(),
             trip_id: "trip-2".to_owned(),
             realtime_trip_id: "rt-2".to_owned(),
             line: "366".to_owned(),
@@ -1650,6 +1863,7 @@ mod tests {
     #[test]
     fn calendar_dates_only_service_is_inactive_without_an_addition() {
         let trip = QbuzzTrip {
+            operator: "qbuzz".to_owned(),
             trip_id: "trip-1".to_owned(),
             realtime_trip_id: "rt-1".to_owned(),
             line: "366".to_owned(),
@@ -1681,9 +1895,10 @@ mod tests {
     fn decodes_vehicle_positions_by_trip_id() {
         let bytes = VehicleFeedMessage {
             entity: vec![VehicleFeedEntity {
+                id: "2026-09-29:CXX:U006:9".to_owned(),
                 vehicle: Some(VehiclePosition {
                     trip: Some(TripDescriptor {
-                        trip_id: "QBUZZ:z3:1001".to_owned(),
+                        trip_id: "987654321".to_owned(),
                     }),
                     current_stop_sequence: Some(4),
                     current_status: Some(1),
@@ -1697,10 +1912,49 @@ mod tests {
         .encode_to_vec();
 
         let position = decode_vehicle_positions(&bytes).unwrap();
-        let position = position.get("QBUZZ:z3:1001").unwrap();
+        assert!(position.contains_key("987654321"));
+        let position = position.get("CXX:U006:9").unwrap();
         assert_eq!(position.vehicle_id, "1234");
         assert_eq!(position.current_stop_sequence, Some(4));
         assert_eq!(position.current_status, Some(1));
+    }
+
+    #[test]
+    fn matches_realtime_entity_id_when_numeric_trip_id_differs_from_gtfs() {
+        let bytes = FeedMessage {
+            header: None,
+            entity: vec![FeedEntity {
+                id: "2026-09-29:CXX:U006:9".to_owned(),
+                trip_update: Some(TripUpdate {
+                    trip: Some(TripDescriptor {
+                        trip_id: "987654321".to_owned(),
+                    }),
+                    stop_time_update: Vec::new(),
+                    vehicle: Some(VehicleDescriptor {
+                        id: String::new(),
+                        label: "1234".to_owned(),
+                    }),
+                    timestamp: None,
+                    delay: Some(60),
+                }),
+            }],
+        }
+        .encode_to_vec();
+
+        let updates = decode_trip_updates(&bytes).unwrap();
+        assert_eq!(
+            updates
+                .get("987654321")
+                .and_then(|update| update.vehicle_id.as_deref()),
+            Some("1234")
+        );
+        assert_eq!(
+            updates
+                .get("CXX:U006:9")
+                .and_then(|update| update.vehicle_id.as_deref()),
+            Some("1234")
+        );
+        assert_eq!(realtime_entity_trip_id("not-a-date:CXX:U006:9"), None);
     }
 
     #[test]
@@ -1708,6 +1962,7 @@ mod tests {
         let bytes = FeedMessage {
             header: None,
             entity: vec![FeedEntity {
+                id: String::new(),
                 trip_update: Some(TripUpdate {
                     trip: Some(TripDescriptor {
                         trip_id: "trip-1".to_owned(),
@@ -1747,6 +2002,7 @@ mod tests {
         .encode_to_vec();
         let updates = decode_trip_updates(&bytes).unwrap();
         let trip = QbuzzTrip {
+            operator: "qbuzz".to_owned(),
             trip_id: "trip-1".to_owned(),
             realtime_trip_id: "trip-1".to_owned(),
             line: "401".to_owned(),
@@ -1890,6 +2146,8 @@ struct VehicleFeedMessage {
 
 #[derive(Clone, PartialEq, Message)]
 struct VehicleFeedEntity {
+    #[prost(string, tag = "1")]
+    id: String,
     #[prost(message, optional, tag = "4")]
     vehicle: Option<VehiclePosition>,
 }
@@ -1914,6 +2172,8 @@ struct FeedHeader {
 
 #[derive(Clone, PartialEq, Message)]
 struct FeedEntity {
+    #[prost(string, tag = "1")]
+    id: String,
     #[prost(message, optional, tag = "3")]
     trip_update: Option<TripUpdate>,
 }

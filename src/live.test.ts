@@ -23,6 +23,33 @@ describe("plannedMarkerMinute", () => {
 describe("web live-api", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("bewaart een mislukte live-ophaalpoging niet als actuele feed", async () => {
+    const values = new Map<string, string>();
+    vi.stubGlobal("window", {
+      location: { pathname: "/" },
+      localStorage: {
+        getItem: (key: string) => values.get(key) ?? null,
+        setItem: (key: string, value: string) => values.set(key, value),
+        removeItem: (key: string) => values.delete(key),
+      },
+    });
+    const unavailable = {
+      statuses: [],
+      sync: { state: "unavailable", message: "Realtime-feed onbereikbaar", fetchedAt: null },
+    };
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response(JSON.stringify(unavailable), { status: 200, headers: { ETag: '"unavailable"' } }))
+      .mockResolvedValueOnce(new Response(null, { status: 304 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const first = await getQbuzzLiveStatuses("2026-09-29", []);
+    const second = await getQbuzzLiveStatuses("2026-09-29", []);
+
+    expect(first.sync.state).toBe("unavailable");
+    expect(second.sync.state).toBe("unavailable");
+    expect(getCachedQbuzzLiveStatuses("2026-09-29")).toBeUndefined();
+  });
+
   it("stuurt in de webversie alleen de datum naar de serverbackend", async () => {
     const values = new Map<string, string>();
     vi.stubGlobal("window", {
@@ -78,7 +105,7 @@ describe("web live-api", () => {
     expect(response.statuses[0].vehicleId).toBe(response.statuses[1].vehicleId);
     expect(response.diagnostics?.vehicleUpdates).toBe(2);
     expect(fetchMock).toHaveBeenCalledWith(
-      "/api/qbuzz/live?date=2026-07-12&divisions=",
+      "/api/live?date=2026-07-12&divisions=",
       expect.objectContaining({ method: "GET" }),
     );
     expect(fetchMock.mock.calls[0][1]).not.toHaveProperty("body");

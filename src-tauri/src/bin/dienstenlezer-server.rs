@@ -84,6 +84,8 @@ struct AppState {
 struct Concession {
     id: String,
     name: String,
+    #[serde(default = "default_operator")]
+    operator: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -160,6 +162,7 @@ struct StoredFileSummary {
     expires_on: Option<String>,
     day_segment: String,
     division_id: String,
+    operator: String,
     content_hash: Option<String>,
     service_count: usize,
     movement_count: usize,
@@ -211,6 +214,8 @@ struct ContentHashCheckResponse {
 
 #[derive(Default, Deserialize)]
 struct StoredParseResult {
+    #[serde(default = "default_operator")]
+    operator: String,
     #[serde(default)]
     movements: Vec<StoredMovement>,
 }
@@ -218,7 +223,6 @@ struct StoredParseResult {
 #[derive(Default, Deserialize)]
 struct StoredMovement {
     id: String,
-    omloopnummer: Option<String>,
     lijnnummer: Option<String>,
     ritnummer: Option<String>,
     vertrek: String,
@@ -296,6 +300,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/api/health", get(health))
         .route(
             "/api/qbuzz/live",
+            get(qbuzz_live_from_schedule).post(qbuzz_live_legacy),
+        )
+        .route(
+            "/api/live",
             get(qbuzz_live_from_schedule).post(qbuzz_live_legacy),
         )
         .route("/api/catalog", get(catalog))
@@ -1433,6 +1441,10 @@ fn default_division_id() -> String {
     String::new()
 }
 
+fn default_operator() -> String {
+    "qbuzz".to_owned()
+}
+
 fn normalize_expiry(value: Option<&str>) -> Result<Option<String>, (StatusCode, Json<ApiError>)> {
     let value = value.map(str::trim).filter(|value| !value.is_empty());
     let Some(value) = value else {
@@ -1584,6 +1596,12 @@ fn file_summary(record: &StoredFileRecord) -> StoredFileSummary {
         expires_on: record.expires_on.clone(),
         day_segment: record.day_segment.clone(),
         division_id: record.division_id.clone(),
+        operator: record
+            .parse_result
+            .get("operator")
+            .and_then(Value::as_str)
+            .unwrap_or("qbuzz")
+            .to_owned(),
         content_hash: record.content_hash.clone(),
         service_count: value_array_len(&record.parse_result, "diensten"),
         movement_count: value_array_len(&record.parse_result, "movements"),
@@ -1745,7 +1763,9 @@ fn validate_organization(
         .collect::<BTreeSet<_>>();
     if concession_ids.len() != organization.concessions.len()
         || organization.concessions.iter().any(|item| {
-            !valid_organization_value(&item.id) || !valid_organization_value(&item.name)
+            !valid_organization_value(&item.id)
+                || !valid_organization_value(&item.name)
+                || !matches!(item.operator.as_str(), "qbuzz" | "transdev")
         })
     {
         return Err(api_error(
@@ -1839,17 +1859,27 @@ fn live_requests_for_records(
         .filter_map(|record| {
             serde_json::from_value::<StoredParseResult>(record.parse_result.clone()).ok()
         })
-        .flat_map(|result| result.movements)
-        .filter(|movement| {
+        .flat_map(|result| {
+            result
+                .movements
+                .into_iter()
+                .map(move |movement| (result.operator.clone(), movement))
+        })
+        .filter(|(_, movement)| {
             movement.movement_type == "rit"
                 && movement
-                    .omloopnummer
+                    .lijnnummer
+                    .as_deref()
+                    .is_some_and(|value| !value.trim().is_empty())
+                && movement
+                    .ritnummer
                     .as_deref()
                     .is_some_and(|value| !value.trim().is_empty())
         })
-        .filter(|movement| movement_in_live_window(movement, current_minute))
-        .map(|movement| LiveMovementRequest {
+        .filter(|(_, movement)| movement_in_live_window(movement, current_minute))
+        .map(|(operator, movement)| LiveMovementRequest {
             movement_id: movement.id,
+            operator,
             line_number: without_legacy_ov_chip_number(
                 movement.lijnnummer.as_deref(),
                 movement.ritnummer.as_deref(),
@@ -2129,6 +2159,14 @@ mod tests {
         let summary = file_summary(&record("weekday", true));
         assert_eq!(summary.service_count, 1);
         assert_eq!(summary.movement_count, 1);
+        assert_eq!(summary.operator, "qbuzz");
+    }
+
+    #[test]
+    fn legacy_concession_defaults_to_qbuzz() {
+        let concession: Concession =
+            serde_json::from_str(r#"{"id":"lkn","name":"Leiden"}"#).unwrap();
+        assert_eq!(concession.operator, "qbuzz");
     }
 
     #[test]

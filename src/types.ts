@@ -5,6 +5,8 @@ export type TextItem = {
   width: number;
 };
 
+export type Operator = "qbuzz" | "transdev";
+
 export type Dienst = {
   id: string;
   serviceNumber: string;
@@ -46,6 +48,7 @@ export type Movement = {
 
 export type ParseResult = {
   fileName: string;
+  operator?: Operator;
   diensten: Dienst[];
   movements: Movement[];
   warnings: string[];
@@ -59,6 +62,7 @@ export type DaySegment = "weekday" | "saturday" | "sunday" | "unassigned";
 export type Concession = {
   id: string;
   name: string;
+  operator?: Operator;
 };
 
 export type Division = {
@@ -105,6 +109,7 @@ export type StoredPdfFileSummary = Omit<StoredPdfFile, "file" | "parseResult"> &
   active: boolean;
   serviceCount: number;
   movementCount: number;
+  operator?: Operator;
 };
 
 export type StoredPdfCatalog = {
@@ -141,6 +146,7 @@ export type LiveMovementRequest = {
 
 export type LiveMovementStatus = {
   movementId: string;
+  operator?: Operator;
   matched: boolean;
   delaySeconds?: number;
   handoverDelaySeconds?: number;

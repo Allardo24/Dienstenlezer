@@ -1,5 +1,9 @@
 # Wijzigingen
 
+## 1.5.0
+
+- Ondersteuning voor transdev diensten!
+
 ## 1.4.9
 
 - Diensten uploaden op telefoon zou nu moeten werken

@@ -6,6 +6,7 @@ import type {
   StoredPdfFileSummary,
   StoredSchedule,
   OrganizationConfig,
+  Operator,
 } from "./types";
 import { serverUrl } from "./serverUrl";
 import { withAuth } from "./auth";
@@ -207,6 +208,15 @@ export async function reparseStoredPdfFiles(
   for (const file of reparsed) {
     await updateServerFile(file.id, { parseResult: file.parseResult });
   }
+}
+
+export async function reparseStoredPdfFile(summary: StoredPdfFileSummary, operator: Operator): Promise<void> {
+  const { parsePdfFiles } = await import("./pdfParser");
+  const response = await serverRequest(`/api/files/${encodeURIComponent(summary.id)}`, { cache: "no-cache" });
+  const pdf = new File([await response.blob()], summary.name, { type: "application/pdf", lastModified: summary.lastModified });
+  const [parseResult] = await parsePdfFiles([pdf], operator);
+  assertUsableReparseResult(summary.name, parseResult);
+  await updateServerFile(summary.id, { parseResult });
 }
 
 export function assertUsableReparseResult(

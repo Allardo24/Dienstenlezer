@@ -1514,6 +1514,14 @@ h2 {
   font-size: 0.78rem;
 }
 
+.concession-group > header select {
+  min-width: 115px;
+}
+
+.file-operator-warning {
+  color: #a94f16;
+}
+
 .concession-group ul {
   display: grid;
   margin: 0;
@@ -2152,6 +2160,16 @@ h2 {
   background: #d8eff5;
 }
 
+.movement-block.is-walking {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.movement-block.is-walking .movement-details {
+  grid-column: 1;
+  grid-row: 2;
+  align-self: end;
+}
+
 .movement-block.continues-next {
   border-right-width: 0;
   border-radius: 8px 0 0 8px;
@@ -2186,6 +2204,7 @@ h2 {
 .movement-times,
 .movement-line-number,
 .movement-details span,
+.movement-details strong,
 .movement-details small {
   display: block;
   overflow: hidden;
@@ -2234,6 +2253,12 @@ h2 {
   color: #344d5c;
   font-size: 0.82rem;
   font-weight: 700;
+}
+
+.movement-walking-route {
+  color: #17343f;
+  font-size: 0.82rem;
+  font-weight: 800;
 }
 
 .movement-details small {
@@ -2393,6 +2418,8 @@ h2 {
   .movement-details {
     display: none;
   }
+
+  .movement-block.is-walking .movement-details { display: block; }
 }
 
 .type-pauze {

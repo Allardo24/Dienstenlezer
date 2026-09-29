@@ -57,6 +57,7 @@ import {
   getStoredPdfCatalog,
   getStoredSchedule,
   reparseStoredPdfFiles,
+  reparseStoredPdfFile,
   saveAdminSettings,
   saveStoredPdfFile,
   saveOrganizationConfig,
@@ -81,6 +82,7 @@ import type {
   LiveMovementStatus,
   LiveStatusResponse,
   LiveSyncState,
+  Operator,
   Movement,
   OrganizationConfig,
   OrtRates,
@@ -154,7 +156,6 @@ function cachedLiveResponse(date: string, divisionIds: string[] = []): LiveStatu
     sync: {
       ...cached.response.sync,
       state: "syncing",
-      fetchedAt: cached.response.sync.fetchedAt ?? Math.floor(cached.savedAt / 1000),
       message: "Opgeslagen livegegevens geladen; actuele gegevens worden opgehaald...",
     },
   };
@@ -461,7 +462,7 @@ function App() {
             statuses: [],
             sync: {
               state: "unavailable",
-              message: "Geen ritten binnen twee uur voor of na nu beschikbaar voor Qbuzz-live.",
+              message: "Geen ritten binnen twee uur voor of na nu beschikbaar voor livegegevens.",
             },
           });
           timer = window.setTimeout(() => void refreshLiveStatuses(), appConfig.live.refreshIntervalSeconds * 1000);
@@ -474,8 +475,8 @@ function App() {
             ...current.sync,
             state: "syncing",
             message: current.statuses.length > 0
-              ? "Nieuwe Qbuzz-livegegevens ophalen..."
-              : "Eerste Qbuzz-livegegevens ophalen...",
+              ? "Nieuwe livegegevens ophalen..."
+              : "Eerste livegegevens ophalen...",
           },
         }));
         const response = await getQbuzzLiveStatuses(selectedDate, requestMovements, selectedDivisionIds);
@@ -573,6 +574,14 @@ function App() {
       if (pendingFiles.length > 0) {
         const { parsePdfFiles } = await import("./pdfParser");
         const parsedResults = await parsePdfFiles(pendingFiles.map(({ file }) => file));
+        const selectedConcession = organization.concessions.find((concession) => (
+          concession.id === organization.divisions.find((division) => division.id === uploadDivisionId)?.concessionId
+        ));
+        for (const result of parsedResults) {
+          if (selectedConcession && result.operator && result.operator !== (selectedConcession.operator ?? "qbuzz")) {
+            throw new Error(`"${result.fileName}" is herkend als ${result.operator === "transdev" ? "Transdev" : "Qbuzz"}. Kies een divisie bij de juiste vervoerder of wijzig de vervoerder van de concessie in Serverinstellingen.`);
+          }
+        }
         const stored: StoredPdfFile[] = pendingFiles.map(({ file, contentHash }, index) => ({
           id: createStoredFileId(file),
           name: file.name,
@@ -650,6 +659,14 @@ function App() {
   }
 
   async function moveStoredFileToDivision(file: StoredPdfFileSummary, divisionId: string) {
+    const concession = organization.concessions.find((candidate) => (
+      candidate.id === organization.divisions.find((division) => division.id === divisionId)?.concessionId
+    ));
+    if (concession && (file.operator ?? "qbuzz") !== (concession.operator ?? "qbuzz")) {
+      setStorageError(`"${file.name}" is een ${file.operator === "transdev" ? "Transdev" : "Qbuzz"}-bestand. Kies een divisie bij de juiste vervoerder.`);
+      return;
+    }
+    setStorageError(undefined);
     await updateStoredPdfFileDivision(file.id, divisionId);
     await reloadStoredFiles();
   }
@@ -669,6 +686,19 @@ function App() {
     setStorageError(undefined);
     try {
       await reparseStoredPdfFiles(storedFiles);
+      await reloadStoredFiles();
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setIsParsing(false);
+    }
+  }
+
+  async function correctStoredFileOperator(file: StoredPdfFileSummary, operator: Operator) {
+    setStorageError(undefined);
+    setIsParsing(true);
+    try {
+      await reparseStoredPdfFile(file, operator);
       await reloadStoredFiles();
     } catch (error) {
       setStorageError(error instanceof Error ? error.message : String(error));
@@ -835,6 +865,7 @@ function App() {
           onMoveFileDivision={moveStoredFileToDivision}
           onFileExpiryChange={changeStoredFileExpiry}
           onReparseFiles={reparseStoredFiles}
+          onCorrectFileOperator={correctStoredFileOperator}
           onDeleteFile={removeStoredFile}
           canManageServer={!accountsAvailable() || authSession?.account.role === "admin"}
           isAdmin={authSession?.account.role === "admin"}
@@ -1012,16 +1043,23 @@ function Metric({ icon, label, value }: { icon: React.ReactNode; label: string; 
 
 function VehicleLink({
   vehicleId,
+  operator,
   className = "",
   children,
   title,
 }: {
   vehicleId: string;
+  operator?: Operator;
   className?: string;
   children?: React.ReactNode;
   title?: string;
 }) {
   const compactId = vehicleId.trim();
+  if (operator === "transdev") {
+    return <span className={`vehicle-link ${className}`.trim()} title={title ?? `Bus ${compactId}`}>
+      {children ?? <><BusFront size={16} /> Bus {compactId}</>}
+    </span>;
+  }
   const vehicleSlug = compactId.toLowerCase().startsWith("qbz_") ? compactId : `qbz_${compactId}`;
 
   return (
@@ -1071,6 +1109,7 @@ function SettingsPage({
   onMoveFileDivision,
   onFileExpiryChange,
   onReparseFiles,
+  onCorrectFileOperator,
   onDeleteFile,
   canManageServer,
   isAdmin,
@@ -1102,6 +1141,7 @@ function SettingsPage({
   onMoveFileDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
   onFileExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onReparseFiles: () => Promise<void>;
+  onCorrectFileOperator: (file: StoredPdfFileSummary, operator: Operator) => Promise<void>;
   onDeleteFile: (file: StoredPdfFileSummary) => Promise<void>;
   canManageServer: boolean;
   isAdmin: boolean;
@@ -1150,7 +1190,7 @@ function SettingsPage({
     const id = organizationItemId(name, organization.concessions.map((concession) => concession.id));
     void onOrganizationChange({
       ...organization,
-      concessions: [...organization.concessions, { id, name }],
+      concessions: [...organization.concessions, { id, name, operator: "qbuzz" }],
     });
     setNewConcessionName("");
   }
@@ -1174,6 +1214,15 @@ function SettingsPage({
       ...organization,
       divisions: organization.divisions.map((candidate) => (
         candidate.id === division.id ? { ...candidate, concessionId } : candidate
+      )),
+    });
+  }
+
+  function changeConcessionOperator(concession: Concession, operator: Operator) {
+    void onOrganizationChange({
+      ...organization,
+      concessions: organization.concessions.map((candidate) => (
+        candidate.id === concession.id ? { ...candidate, operator } : candidate
       )),
     });
   }
@@ -1317,6 +1366,7 @@ function SettingsPage({
             onMoveDivision={onMoveFileDivision}
             onExpiryChange={onFileExpiryChange}
             onReparseFiles={onReparseFiles}
+            onCorrectFileOperator={onCorrectFileOperator}
             onDelete={onDeleteFile}
           />
         )}
@@ -1364,6 +1414,14 @@ function SettingsPage({
                   <header>
                     <strong>{concession.name}</strong>
                     <span>{divisions.length} divisies</span>
+                    <select
+                      aria-label={`Vervoerder voor ${concession.name}`}
+                      value={concession.operator ?? "qbuzz"}
+                      onChange={(event) => changeConcessionOperator(concession, event.target.value as Operator)}
+                    >
+                      <option value="qbuzz">Qbuzz</option>
+                      <option value="transdev">Transdev</option>
+                    </select>
                     <button
                       className="icon-button danger"
                       type="button"
@@ -1625,6 +1683,7 @@ function FileManagementTab({
   onMoveDivision,
   onExpiryChange,
   onReparseFiles,
+  onCorrectFileOperator,
   onDelete,
 }: {
   files: StoredPdfFileSummary[];
@@ -1640,6 +1699,7 @@ function FileManagementTab({
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
   onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
   onReparseFiles: () => Promise<void>;
+  onCorrectFileOperator: (file: StoredPdfFileSummary, operator: Operator) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
   return (
@@ -1716,6 +1776,7 @@ function FileManagementTab({
         onMove={onMove}
         onMoveDivision={onMoveDivision}
         onExpiryChange={onExpiryChange}
+        onCorrectFileOperator={onCorrectFileOperator}
         onDelete={onDelete}
       />
     </div>
@@ -1730,6 +1791,7 @@ function FilesPage({
   onMove,
   onMoveDivision,
   onExpiryChange,
+  onCorrectFileOperator,
   onDelete,
 }: {
   files: StoredPdfFileSummary[];
@@ -1739,6 +1801,7 @@ function FilesPage({
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
   onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
+  onCorrectFileOperator: (file: StoredPdfFileSummary, operator: Operator) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
   if (isLoading && files.length === 0) {
@@ -1766,6 +1829,7 @@ function FilesPage({
           onMove={onMove}
           onMoveDivision={onMoveDivision}
           onExpiryChange={onExpiryChange}
+          onCorrectFileOperator={onCorrectFileOperator}
           onDelete={onDelete}
         />
         <FileStatusGroup
@@ -1777,6 +1841,7 @@ function FilesPage({
           onMove={onMove}
           onMoveDivision={onMoveDivision}
           onExpiryChange={onExpiryChange}
+          onCorrectFileOperator={onCorrectFileOperator}
           onDelete={onDelete}
         />
       </div>
@@ -1793,6 +1858,7 @@ type FileStatusGroupProps = {
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
   onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
+  onCorrectFileOperator: (file: StoredPdfFileSummary, operator: Operator) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 };
 
@@ -1805,6 +1871,7 @@ function FileStatusGroup({
   onMove,
   onMoveDivision,
   onExpiryChange,
+  onCorrectFileOperator,
   onDelete,
 }: FileStatusGroupProps) {
   const [expandedConcessions, setExpandedConcessions] = useState<Record<string, boolean>>({});
@@ -1825,6 +1892,13 @@ function FileStatusGroup({
 
   async function moveFile(file: StoredPdfFileSummary, daySegment: DaySegment, divisionId: string) {
     if (file.divisionId !== divisionId) {
+      const targetConcession = organization.concessions.find((candidate) => (
+        candidate.id === organization.divisions.find((division) => division.id === divisionId)?.concessionId
+      ));
+      if (targetConcession && (targetConcession.operator ?? "qbuzz") !== (file.operator ?? "qbuzz")) {
+        await onMoveDivision(file, divisionId);
+        return;
+      }
       await onMoveDivision(file, divisionId);
     }
     if (file.daySegment !== daySegment) {
@@ -1930,6 +2004,7 @@ function FileStatusGroup({
                                     onMove={onMove}
                                     onMoveDivision={onMoveDivision}
                                     onExpiryChange={onExpiryChange}
+                                    onCorrectFileOperator={onCorrectFileOperator}
                                     onDelete={onDelete}
                                   />
                                 ))}
@@ -1954,6 +2029,7 @@ function FileStatusGroup({
                                   onMove={onMove}
                                   onMoveDivision={onMoveDivision}
                                   onExpiryChange={onExpiryChange}
+                                  onCorrectFileOperator={onCorrectFileOperator}
                                   onDelete={onDelete}
                                 />
                               ))}
@@ -2021,6 +2097,7 @@ function StoredFileCard({
   onMove,
   onMoveDivision,
   onExpiryChange,
+  onCorrectFileOperator,
   onDelete,
 }: {
   file: StoredPdfFileSummary;
@@ -2029,12 +2106,16 @@ function StoredFileCard({
   onMove: (file: StoredPdfFileSummary, daySegment: DaySegment) => Promise<void>;
   onMoveDivision: (file: StoredPdfFileSummary, divisionId: string) => Promise<void>;
   onExpiryChange: (file: StoredPdfFileSummary, expiresOn: string) => Promise<void>;
+  onCorrectFileOperator: (file: StoredPdfFileSummary, operator: Operator) => Promise<void>;
   onDelete: (file: StoredPdfFileSummary) => Promise<void>;
 }) {
   const expiryDetailsRef = useRef<HTMLDetailsElement | null>(null);
   const [expiryDraft, setExpiryDraft] = useState(file.expiresOn ?? "");
   const [isSavingExpiry, setIsSavingExpiry] = useState(false);
   const isExpired = file.enabled && !file.active;
+  const selectedDivision = organization.divisions.find((division) => division.id === file.divisionId);
+  const selectedConcession = organization.concessions.find((concession) => concession.id === selectedDivision?.concessionId);
+  const operatorMismatch = selectedConcession && (selectedConcession.operator ?? "qbuzz") !== (file.operator ?? "qbuzz");
   const expiryTitle = file.expiresOn
     ? `${file.active ? "Actief tot en met" : "Verlopen op"} ${formatDate(file.expiresOn)}`
     : "Verloopdatum instellen";
@@ -2071,6 +2152,14 @@ function StoredFileCard({
         <strong>{file.name}</strong>
         <span>{formatFileSize(file.size)} - {file.serviceCount} diensten - {file.movementCount} regels</span>
         <small>Toegevoegd {formatDateTime(file.uploadedAt)}</small>
+        {operatorMismatch && <small className="file-operator-warning">Vervoerder wijkt af van de concessie. Controleer de indeling.</small>}
+        <label className="file-division">
+          <span>Herkende vervoerder</span>
+          <select value={file.operator ?? "qbuzz"} onChange={(event) => void onCorrectFileOperator(file, event.target.value as Operator)}>
+            <option value="qbuzz">Qbuzz</option>
+            <option value="transdev">Transdev</option>
+          </select>
+        </label>
         <label className="file-division">
           <span>Divisie</span>
           <select value={file.divisionId} onChange={(event) => void onMoveDivision(file, event.target.value)}>
@@ -2240,6 +2329,7 @@ type GuidanceEntry = {
 
 type GuidanceLiveInfo = {
   vehicleId?: string;
+  operator?: Operator;
   delaySeconds?: number;
   handoverDelaySeconds?: number;
   handoverExpectedAt?: number;
@@ -2263,6 +2353,7 @@ type TakeoverArrivalInfo = {
   delaySeconds?: number;
   stopSpecific?: boolean;
   vehicleId?: string;
+  operator?: Operator;
 };
 
 type GuidanceTakeoverDisplay = ReturnType<typeof calculateTakeoverStatus> & {
@@ -2272,6 +2363,7 @@ type GuidanceTakeoverDisplay = ReturnType<typeof calculateTakeoverStatus> & {
   plannedArrival: string;
   timingLabel: string;
   vehicleId?: string;
+  operator?: Operator;
 };
 
 const LIVE_STALE_AFTER_SECONDS = appConfig.live.staleAfterSeconds;
@@ -2280,17 +2372,21 @@ function LiveDataStatus({
   sync,
   currentTime,
   className = "",
-  label = "Qbuzz live",
+  label = "Livegegevens",
 }: {
   sync: LiveSyncState;
   currentTime: Date;
   className?: string;
   label?: string;
 }) {
-  const ageSeconds = sync.fetchedAt === undefined
+  const fetchedAt = typeof sync.fetchedAt === "number" && Number.isFinite(sync.fetchedAt) && sync.fetchedAt > 0
+    ? sync.fetchedAt
+    : undefined;
+  const ageSeconds = fetchedAt === undefined
     ? undefined
-    : Math.max(0, Math.floor(currentTime.getTime() / 1000) - sync.fetchedAt);
-  const stale = ageSeconds !== undefined && ageSeconds > LIVE_STALE_AFTER_SECONDS;
+    : Math.max(0, Math.floor(currentTime.getTime() / 1000) - fetchedAt);
+  const stale = (sync.state === "ready" || sync.state === "syncing")
+    && ageSeconds !== undefined && ageSeconds > LIVE_STALE_AFTER_SECONDS;
   const stateClass = stale ? "state-stale" : `state-${sync.state}`;
   const heading = stale
     ? `Pas op! Livegegevens al ${formatLiveAge(ageSeconds)} niet ververst`
@@ -2299,13 +2395,13 @@ function LiveDataStatus({
       : sync.state === "error"
         ? "Livegegevens konden niet worden ververst"
         : sync.state === "unavailable"
-          ? "Geen gekoppelde Qbuzz-ritten"
+          ? "Livegegevens niet beschikbaar"
         : sync.state === "ready"
           ? `${label} bijgewerkt`
           : label;
-  const detail = sync.fetchedAt === undefined
+  const detail = fetchedAt === undefined || sync.state === "unavailable" || sync.state === "error"
     ? sync.message
-    : `Laatste feed ${formatEpochClock(sync.fetchedAt)} - ${formatLiveAge(ageSeconds ?? 0)} geleden`;
+    : `Laatste feed ${formatEpochClock(fetchedAt)} - ${formatLiveAge(ageSeconds ?? 0)} geleden`;
 
   return (
     <div className={`live-data-status ${stateClass} ${className}`.trim()} role={stale || sync.state === "error" ? "alert" : "status"} title={sync.message}>
@@ -2529,10 +2625,10 @@ function DutyGuidance({
                         <GuidanceMovementIdentity movement={entry.movement} variant="row" />
                         <div className="guidance-row-copy">
                           <strong>{guidanceActionTitle(entry.movement)}</strong>
-                          <span>{guidanceActionSubtitle(entry.movement)}</span>
+                          {guidanceActionSubtitle(entry.movement) && <span>{guidanceActionSubtitle(entry.movement)}</span>}
                           <div className="guidance-badges">
                             {entry.movement.omloopnummer && <em>Omloop {displayLoopNumber(entry.movement.omloopnummer)}</em>}
-                            {live.vehicleId && <VehicleLink vehicleId={live.vehicleId} className="bus-badge" />}
+                            {live.vehicleId && <VehicleLink vehicleId={live.vehicleId} operator={live.operator} className="bus-badge" />}
                           </div>
                         </div>
                       </div>
@@ -2584,14 +2680,14 @@ function GuidanceAction({
           <GuidanceMovementIdentity movement={entry.movement} variant="panel" />
           <div>
             <strong>{guidanceActionTitle(entry.movement)}</strong>
-            <p>{guidanceActionSubtitle(entry.movement)}</p>
+            {guidanceActionSubtitle(entry.movement) && <p>{guidanceActionSubtitle(entry.movement)}</p>}
           </div>
         </div>
       ) : <strong>{fallback}</strong>}
       {entry && (
         <div className="guidance-action-meta">
           {entry.movement.omloopnummer && <span>Omloop {displayLoopNumber(entry.movement.omloopnummer)}</span>}
-          {live.vehicleId && <VehicleLink vehicleId={live.vehicleId} className="bus-badge" />}
+          {live.vehicleId && <VehicleLink vehicleId={live.vehicleId} operator={live.operator} className="bus-badge" />}
         </div>
       )}
       {takeover && <GuidanceTakeoverAlert takeover={takeover} arrival={takeoverArrival} live={live} currentMinute={currentMinute} />}
@@ -2616,7 +2712,7 @@ function GuidanceTakeoverAlert({ takeover, arrival, live, currentMinute }: { tak
     <div className={`guidance-action-takeover ${display.tone}`}>
       <strong>Overname bij {takeover.entry.movement.van || "halte"}</strong>
       <span>
-        {display.vehicleId ? <><VehicleLink vehicleId={display.vehicleId} className="vehicle-inline-link">Bus {display.vehicleId}</VehicleLink>{" "}</> : "Bus "}
+        {display.vehicleId ? <><VehicleLink vehicleId={display.vehicleId} operator={display.operator} className="vehicle-inline-link">Bus {display.vehicleId}</VehicleLink>{" "}</> : "Bus "}
         {`${arrivalVerb} ${display.expectedArrival}${showDifference ? ` (${formatHandoverDifference(display.delaySeconds)})` : ""}, ${formatDepartureWindow(display.minutesToDeparture, takeover.entry.movement.vertrek)}`}
       </span>
     </div>
@@ -2642,7 +2738,7 @@ function GuidanceTakeover({ takeover, live, arrival, currentMinute }: { takeover
         <span>{location} - gepland: aankomst {display.plannedArrival}, vertrek {movement.vertrek}</span>
       </div>
       {display.vehicleId && (
-        <VehicleLink vehicleId={display.vehicleId} className="guidance-takeover-bus">
+        <VehicleLink vehicleId={display.vehicleId} operator={display.operator} className="guidance-takeover-bus">
           <BusFront size={20} />
           <span>Bus</span>
           <strong>{display.vehicleId}</strong>
@@ -2990,7 +3086,7 @@ function TimelineRow({
       <div className="timeline-loop">
         <span>{displayLoopNumber(loop)}</span>
         {currentLive.vehicleId && (
-          <VehicleLink vehicleId={currentLive.vehicleId} className="timeline-loop-vehicle">
+          <VehicleLink vehicleId={currentLive.vehicleId} operator={currentLive.operator} className="timeline-loop-vehicle">
             Bus {currentLive.vehicleId}
           </VehicleLink>
         )}
@@ -3050,7 +3146,7 @@ function liveInfoForLoop(
   movements: { movement: Movement; timing: TimelineTiming }[],
   liveStatusByMovementId: Map<string, LiveMovementStatus>,
   currentMinute: number | undefined,
-): { vehicleId?: string; delaySeconds?: number } {
+): { vehicleId?: string; operator?: Operator; delaySeconds?: number } {
   if (currentMinute === undefined) {
     return {};
   }
@@ -3065,10 +3161,11 @@ function liveInfoForLoop(
   const latestVehicle = updates
     .filter(({ timing, status }) => timing.start <= currentMinute && Boolean(status.vehicleId))
     .sort((first, second) => second.timing.start - first.timing.start)
-    .at(0)?.status.vehicleId;
+    .at(0)?.status;
 
   return {
-    vehicleId: active?.status.vehicleId ?? latestVehicle,
+    vehicleId: active?.status.vehicleId ?? latestVehicle?.vehicleId,
+    operator: active?.status.vehicleId ? active.status.operator : latestVehicle?.operator,
     delaySeconds: active?.status.delaySeconds,
   };
 }
@@ -3097,6 +3194,7 @@ function MovementBlock({
   const [isExpanded, setIsExpanded] = useState(false);
   const [expandedWidth, setExpandedWidth] = useState<number | undefined>();
   const displayWidth = Math.max(0, width);
+  const isWalking = isWalkingMovement(movement);
 
   useEffect(
     () => () => {
@@ -3108,7 +3206,7 @@ function MovementBlock({
   );
 
   function handleMouseEnter() {
-    hoverTimer.current = window.setTimeout(() => setIsExpanded(true), 1000);
+    hoverTimer.current = window.setTimeout(() => setIsExpanded(true), isWalking ? 0 : 1000);
   }
 
   function handleMouseLeave() {
@@ -3125,7 +3223,7 @@ function MovementBlock({
       return;
     }
 
-    const textWidths = [...detailsRef.current.querySelectorAll("span, small")].map((element) => element.scrollWidth);
+    const textWidths = [...detailsRef.current.querySelectorAll("span, small, strong")].map((element) => element.scrollWidth);
     const widestText = Math.max(0, ...textWidths);
     setExpandedWidth(Math.max(displayWidth, 54 + 5 + widestText + 16));
   }, [displayWidth, isExpanded]);
@@ -3134,6 +3232,7 @@ function MovementBlock({
     <article
       className={[
         "movement-block",
+        isWalking ? "is-walking" : "",
         isLockedDuty ? "is-locked-duty" : "",
         `type-${movement.type}`,
         continuesFromPrevious ? "continues-previous" : "",
@@ -3163,17 +3262,25 @@ function MovementBlock({
         <br />
         {movement.aankomst}
       </time>
-      <strong
-        className="movement-line-number"
-        style={splitTripSizingWidth === undefined ? undefined : {
-          fontSize: `clamp(0.6rem, ${splitTripSizingWidth * 0.17}px, 1.2rem)`,
-        }}
-      >
-        {formatLineLabel(movement.lijnnummer, movement.type)}
-      </strong>
+      {!isWalking && (
+        <strong
+          className="movement-line-number"
+          style={splitTripSizingWidth === undefined ? undefined : {
+            fontSize: `clamp(0.6rem, ${splitTripSizingWidth * 0.17}px, 1.2rem)`,
+          }}
+        >
+          {movement.lijnnummer ? formatLineLabel(movement.lijnnummer, movement.type) : labelForMovement(movement)}
+        </strong>
+      )}
       <div className="movement-details" ref={detailsRef}>
-        <span>{movement.ritnummer ? `rit ${movement.ritnummer}` : labelForType(movement.type)}</span>
-        <small>{movement.van} -&gt; {movement.naar}</small>
+        {isWalking ? (
+          <strong className="movement-walking-route">{formatServiceRoute(movement)}</strong>
+        ) : (
+          <>
+            <span>{movement.ritnummer ? `rit ${movement.ritnummer}` : labelForMovement(movement)}</span>
+            <small>{movement.van} -&gt; {movement.naar}</small>
+          </>
+        )}
       </div>
     </article>
   );
@@ -3213,20 +3320,21 @@ function MovementDialog({
           <strong>{movement.vertrek}</strong>
           <span>{movement.aankomst}</span>
         </time>
-        <strong className="movement-dialog-line">{formatLineLabel(movement.lijnnummer, movement.type)}</strong>
+        <strong className="movement-dialog-line">{movement.lijnnummer ? formatLineLabel(movement.lijnnummer, movement.type) : labelForMovement(movement)}</strong>
         <div className="movement-dialog-main">
           <strong>{movement.van} -&gt; {movement.naar}</strong>
-          <span>{movement.ritnummer ? `rit ${movement.ritnummer}` : labelForType(movement.type)}</span>
+          <span>{movement.ritnummer ? `rit ${movement.ritnummer}` : labelForMovement(movement)}</span>
           <div className="movement-dialog-meta">
             <span>Dienst {movement.dienstnummer}</span>
             {movement.omloopnummer && <span>Omloop {displayLoopNumber(movement.omloopnummer)}</span>}
             {vehicleId && (
               <VehicleLink
                 vehicleId={vehicleId}
+                operator={liveStatus?.operator}
                 className={`movement-dialog-vehicle ${hasDirectVehicleId ? "is-live" : "is-derived"}`}
-                title={hasDirectVehicleId
-                  ? `Bus ${vehicleId} is live aan deze rit gekoppeld. Open op Busposities.nl`
-                  : `Bus ${vehicleId} is afgeleid van de actuele omloop. Open op Busposities.nl`}
+                title={`${hasDirectVehicleId
+                  ? `Bus ${vehicleId} is live aan deze rit gekoppeld`
+                  : `Bus ${vehicleId} is afgeleid van de actuele omloop`}${liveStatus?.operator === "transdev" ? "" : ". Open op Busposities.nl"}`}
               />
             )}
             {hasDelay && <span className="delay">{delay! > 0 ? "+" : ""}{Math.round(delay! / 60)} min</span>}
@@ -3287,7 +3395,7 @@ function MovementTable({
                   <td>{movement.van}</td>
                   <td>{movement.naar}</td>
                   <td>{movement.aankomst}</td>
-                  <td>{labelForType(movement.type)}</td>
+                  <td>{labelForMovement(movement)}</td>
                   <td>{movement.materieelsoort ?? "-"}</td>
                   <td>{movement.sourceFile}</td>
                 </tr>
@@ -3529,6 +3637,7 @@ function getMovementTiming(movement: Movement): TimelineTiming | undefined {
 
 function buildGuidanceEntries(movements: Movement[]): GuidanceEntry[] {
   return movements
+    .filter((movement) => !isEmptyDutyTimeRow(movement))
     .map((movement) => {
       let start = parseTime(movement.vertrek);
       let end = parseTime(movement.aankomst);
@@ -3545,6 +3654,11 @@ function buildGuidanceEntries(movements: Movement[]): GuidanceEntry[] {
     })
     .filter((entry): entry is GuidanceEntry => entry !== undefined)
     .sort((first, second) => first.timing.start - second.timing.start || first.timing.end - second.timing.end);
+}
+
+function isEmptyDutyTimeRow(movement: Movement): boolean {
+  return movement.type === "dienst"
+    && /^\d{1,2}:\d{2}\s+\d{1,2}:\d{2}$/.test(movement.raw.trim());
 }
 
 function buildGuidanceTakeovers(entries: GuidanceEntry[], allMovements: Movement[]): Map<string, GuidanceTakeover> {
@@ -3648,6 +3762,7 @@ function findTakeoverArrival(
     delaySeconds: status?.arrivalDelaySeconds ?? status?.delaySeconds,
     stopSpecific: status?.arrivalStopSpecific,
     vehicleId: status?.vehicleId,
+    operator: status?.operator,
   };
 }
 
@@ -3722,6 +3837,7 @@ function guidanceTakeoverDisplay(
     plannedArrival: formatTimelineMinute(displayedPlannedArrivalMinute),
     timingLabel: arrival?.stopSpecific || live.handoverStopSpecific ? "Aankomst bij halte" : "Geschatte aankomst",
     vehicleId: live.vehicleId ?? arrival?.vehicleId,
+    operator: live.vehicleId ? live.operator : arrival?.operator,
   };
 }
 
@@ -3793,6 +3909,7 @@ function buildLoopLiveSnapshots(
     values.sort((first, second) => first.score - second.score || (second.status.updatedAt ?? 0) - (first.status.updatedAt ?? 0));
     snapshots.set(loop, {
       vehicleId: values.find((value) => value.status.vehicleId)?.status.vehicleId,
+      operator: values.find((value) => value.status.vehicleId)?.status.operator,
       delaySeconds: values.find((value) => value.status.delaySeconds !== undefined)?.status.delaySeconds,
     });
   }
@@ -3813,6 +3930,7 @@ function guidanceLiveInfo(
 
   return {
     vehicleId: status?.vehicleId ?? (isNearNow ? snapshot?.vehicleId : undefined),
+    operator: status?.vehicleId ? status.operator : (isNearNow ? snapshot?.operator : undefined),
     delaySeconds: status?.delaySeconds ?? (isNearNow ? snapshot?.delaySeconds : undefined),
     handoverDelaySeconds: status?.handoverDelaySeconds,
     handoverExpectedAt: status?.handoverExpectedAt,
@@ -3828,7 +3946,7 @@ function guidanceLiveInfo(
 }
 
 function guidanceActionTitle(movement: Movement): string {
-  if (movement.type === "rit" || movement.type === "materiaal") {
+  if (movement.type === "rit" || movement.type === "materiaal" || isWalkingMovement(movement)) {
     return formatServiceRoute(movement);
   }
   return formatServiceMovementLabel(movement);
@@ -3856,13 +3974,21 @@ function guidanceIdentityLabel(movement: Movement): string {
   }
 
   if (movement.type === "dienst") {
-    return "DIENST";
+    return labelForMovement(movement).toUpperCase();
   }
 
   return "ACTIE";
 }
 
 function guidanceActionSubtitle(movement: Movement): string {
+  if (movement.type === "pauze" || isWalkingMovement(movement)) {
+    return "";
+  }
+
+  if (isEmptyDutyTimeRow(movement)) {
+    return "";
+  }
+
   if (movement.type === "rit" && movement.ritnummer) {
     return `rit ${movement.ritnummer}`;
   }
@@ -4035,8 +4161,20 @@ function labelForType(type: Movement["type"]): string {
   return labels[type];
 }
 
+function labelForMovement(movement: Movement): string {
+  return movement.type === "dienst" ? formatServiceMovementLabel(movement) : labelForType(movement.type);
+}
+
+function isWalkingMovement(movement: Movement): boolean {
+  return movement.type === "dienst" && /^lopen\b/i.test(movement.raw.trim());
+}
+
 function formatServiceMovementLabel(movement: Movement): string {
   const label = `${movement.van} ${movement.naar} ${movement.raw}`.toLowerCase();
+
+  if (isWalkingMovement(movement)) {
+    return "Lopen";
+  }
 
   if (/\breis\b/.test(label) || /\brij\s+mee\b/.test(label)) {
     return "Reis";
@@ -4148,7 +4286,7 @@ function movementsToCsv(movements: Movement[]): string {
     movement.van,
     movement.naar,
     movement.aankomst,
-    labelForType(movement.type),
+    labelForMovement(movement),
     movement.datum ?? "",
     movement.sourceFile,
     String(movement.pageNumber),

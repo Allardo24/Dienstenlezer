@@ -3,7 +3,8 @@ import pdfWorker from "pdfjs-dist/legacy/build/pdf.worker.mjs?url";
 import { detectMovementColumnLayout, isBuslessDriverRow, textInMovementColumn } from "./pdfColumns";
 import { extractMaterialType, isVehicleMovement, propagateMaterialByLoop } from "./materialType";
 import { readPdfTextItems } from "./pdfText";
-import type { Dienst, Movement, MovementType, ParseResult, TextItem } from "./types";
+import { isTransdevPage, parseTransdevPage } from "./transdevParser";
+import type { Dienst, Movement, MovementType, Operator, ParseResult, TextItem } from "./types";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorker;
 
@@ -24,20 +25,21 @@ const SERVICE_LABEL_RE = /^dienst(?:nummer|nr)?\s*:?\s*$/i;
 const INLINE_SERVICE_RE = /^dienst(?:nummer|nr)?(?:\s*:\s*|\s+)(\S+)\s*$/i;
 const DATE_RE = /^\d{1,2}\/\d{1,2}\/\d{4}$/;
 
-export async function parsePdfFiles(files: File[]): Promise<ParseResult[]> {
+export async function parsePdfFiles(files: File[], forcedOperator?: Operator): Promise<ParseResult[]> {
   const results: ParseResult[] = [];
 
   for (const file of files) {
-    results.push(await parsePdfFile(file));
+    results.push(await parsePdfFile(file, forcedOperator));
   }
 
   return results;
 }
 
-async function parsePdfFile(file: File): Promise<ParseResult> {
+async function parsePdfFile(file: File, forcedOperator?: Operator): Promise<ParseResult> {
   const warnings: string[] = [];
   const diensten: Dienst[] = [];
   const movements: Movement[] = [];
+  let operator: Operator | undefined = forcedOperator;
 
   try {
     const bytes = new Uint8Array(await file.arrayBuffer());
@@ -53,6 +55,20 @@ async function parsePdfFile(file: File): Promise<ParseResult> {
         continue;
       }
 
+      if (operator === "qbuzz" && isTransdevPage(items)) {
+        warnings.push(`${file.name} pagina ${pageNumber}: Transdev-opmaak in een Qbuzz-bestand. Upload de vervoerders afzonderlijk.`);
+        continue;
+      }
+
+      if (!operator) operator = isTransdevPage(items) ? "transdev" : "qbuzz";
+      if (operator === "transdev") {
+        const parsed = parseTransdevPage(file.name, pageNumber, items);
+        diensten.push(...parsed.diensten);
+        movements.push(...parsed.movements);
+        warnings.push(...parsed.warnings);
+        continue;
+      }
+
       const rows = groupRows(items);
       const dienst = readDienst(file.name, pageNumber, rows, items);
       diensten.push(dienst);
@@ -63,7 +79,7 @@ async function parsePdfFile(file: File): Promise<ParseResult> {
     warnings.push(`${file.name}: kon pdf niet uitlezen (${message}).`);
   }
 
-  return { fileName: file.name, diensten, movements: propagateMaterialByLoop(movements), warnings };
+  return { fileName: file.name, operator, diensten, movements: propagateMaterialByLoop(movements), warnings };
 }
 
 function normaliseItems(items: PdfTextContentItem[]): TextItem[] {
